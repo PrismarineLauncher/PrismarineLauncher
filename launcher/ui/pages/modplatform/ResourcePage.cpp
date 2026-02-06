@@ -260,23 +260,46 @@ void ResourcePage::updateUi(const QModelIndex& index)
 
 void ResourcePage::updateSelectionButton()
 {
-    if (!isOpened || m_selectedVersionIndex < 0) {
+    if (!isOpened) {
+        m_ui->resourceSelectionButton->setEnabled(false);
+        return;
+    }
+
+    auto current_pack = getCurrentPack();
+    if (!current_pack) {
+        m_ui->resourceSelectionButton->setEnabled(false);
+        return;
+    }
+
+    int selected_index = m_selectedVersionIndex;
+    if (current_pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
+        auto data = m_ui->versionSelectionBox->currentData();
+        if (data.canConvert<QString>()) {
+            auto file_name = data.toString();
+            for (int i = 0; i < current_pack->versions.size(); ++i) {
+                if (current_pack->versions[i].fileName == file_name) {
+                    selected_index = i;
+                    break;
+                }
+            }
+        } else {
+            selected_index = data.toInt();
+        }
+    }
+
+    if (selected_index < 0) {
         m_ui->resourceSelectionButton->setEnabled(false);
         return;
     }
 
     m_ui->resourceSelectionButton->setEnabled(true);
-    if (auto current_pack = getCurrentPack(); current_pack) {
-        if (current_pack->versionsLoaded && current_pack->versions.empty()) {
-            m_ui->resourceSelectionButton->setEnabled(false);
-            qWarning() << tr("No version available for the selected pack");
-        } else if (!current_pack->isVersionSelected(m_selectedVersionIndex))
-            m_ui->resourceSelectionButton->setText(tr("Select %1 for download").arg(resourceString()));
-        else
-            m_ui->resourceSelectionButton->setText(tr("Deselect %1 for download").arg(resourceString()));
-    } else {
-        qWarning() << "Tried to update the selected button but there is not a pack selected";
-    }
+    if (current_pack->versionsLoaded && current_pack->versions.empty()) {
+        m_ui->resourceSelectionButton->setEnabled(false);
+        qWarning() << tr("No version available for the selected pack");
+    } else if (!current_pack->isVersionSelected(selected_index))
+        m_ui->resourceSelectionButton->setText(tr("Select %1 for download").arg(resourceString()));
+    else
+        m_ui->resourceSelectionButton->setText(tr("Deselect %1 for download").arg(resourceString()));
 }
 
 void ResourcePage::versionListUpdated(const QModelIndex& index)
@@ -304,7 +327,10 @@ void ResourcePage::versionListUpdated(const QModelIndex& index)
                     versionText += tr(" [installed]", "Mod version select");
                 }
 
-                m_ui->versionSelectionBox->addItem(versionText, QVariant(i));
+                if (current_pack->provider == ModPlatform::ResourceProvider::CUSTOM && !version.fileName.isEmpty())
+                    m_ui->versionSelectionBox->addItem(versionText, QVariant(version.fileName));
+                else
+                    m_ui->versionSelectionBox->addItem(versionText, QVariant(i));
             }
         }
         if (m_ui->versionSelectionBox->count() == 0) {
@@ -356,7 +382,12 @@ void ResourcePage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
 
 void ResourcePage::onVersionSelectionChanged(int index)
 {
-    m_selectedVersionIndex = m_ui->versionSelectionBox->itemData(index).toInt();
+    auto current_pack = getCurrentPack();
+    if (current_pack && current_pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
+        m_selectedVersionIndex = -1;
+    } else {
+        m_selectedVersionIndex = m_ui->versionSelectionBox->itemData(index).toInt();
+    }
     updateSelectionButton();
 }
 
@@ -388,12 +419,28 @@ void ResourcePage::removeResourceFromPage(const QString& name)
 
 void ResourcePage::onResourceSelected()
 {
-    auto selected_index = m_ui->versionSelectionBox->currentData().toInt();
+    auto current_pack = getCurrentPack();
+    if (!current_pack)
+        return;
+
+    int selected_index = m_ui->versionSelectionBox->currentData().toInt();
+    if (current_pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
+        auto data = m_ui->versionSelectionBox->currentData();
+        if (data.canConvert<QString>()) {
+            auto file_name = data.toString();
+            selected_index = -1;
+            for (int i = 0; i < current_pack->versions.size(); ++i) {
+                if (current_pack->versions[i].fileName == file_name) {
+                    selected_index = i;
+                    break;
+                }
+            }
+        }
+    }
     if (selected_index < 0)
         return;
 
-    auto current_pack = getCurrentPack();
-    if (!current_pack || !current_pack->versionsLoaded || current_pack->versions.size() <= selected_index)
+    if (!current_pack->versionsLoaded || current_pack->versions.size() <= selected_index)
         return;
 
     auto& version = current_pack->versions[selected_index];
