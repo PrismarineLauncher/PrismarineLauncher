@@ -527,9 +527,32 @@ void ResourcePage::onResourceToggle(const QModelIndex& index)
         if (pack->isAnyVersionSelected())
             removeResourceFromDialog(pack->name);
         else {
-            auto version = std::find_if(pack->versions.begin(), pack->versions.end(), [this](const ModPlatform::IndexedVersion& version) {
-                return m_model->checkVersionFilters(version);
-            });
+            int selected_index = -1;
+            if (pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
+                auto file_name = m_selectedCustomFileName;
+                if (file_name.isEmpty() && isSelected) {
+                    auto data = m_ui->versionSelectionBox->currentData();
+                    if (data.canConvert<QString>())
+                        file_name = data.toString();
+                }
+                if (!file_name.isEmpty()) {
+                    for (int i = 0; i < pack->versions.size(); ++i) {
+                        if (pack->versions[i].fileName == file_name && m_model->checkVersionFilters(pack->versions[i])) {
+                            selected_index = i;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            auto version = pack->versions.end();
+            if (selected_index >= 0) {
+                version = pack->versions.begin() + selected_index;
+            } else {
+                version = std::find_if(pack->versions.begin(), pack->versions.end(), [this](const ModPlatform::IndexedVersion& version) {
+                    return m_model->checkVersionFilters(version);
+                });
+            }
 
             if (version == pack->versions.end()) {
                 if (!pack->versions.isEmpty()) {
