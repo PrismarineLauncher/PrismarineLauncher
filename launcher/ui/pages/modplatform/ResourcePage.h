@@ -109,6 +109,7 @@ class ResourcePage : public QWidget, public BasePage {
     ResourceModel* m_model = nullptr;
 
     int m_selectedVersionIndex = -1;
+    QString m_selectedCustomFileName;
 
     ProgressWidget m_fetchProgress;
 

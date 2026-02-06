@@ -273,17 +273,20 @@ void ResourcePage::updateSelectionButton()
 
     int selected_index = m_selectedVersionIndex;
     if (current_pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
-        auto data = m_ui->versionSelectionBox->currentData();
-        if (data.canConvert<QString>()) {
-            auto file_name = data.toString();
+        auto file_name = m_selectedCustomFileName;
+        if (file_name.isEmpty()) {
+            auto data = m_ui->versionSelectionBox->currentData();
+            if (data.canConvert<QString>())
+                file_name = data.toString();
+        }
+        if (!file_name.isEmpty()) {
+            selected_index = -1;
             for (int i = 0; i < current_pack->versions.size(); ++i) {
                 if (current_pack->versions[i].fileName == file_name) {
                     selected_index = i;
                     break;
                 }
             }
-        } else {
-            selected_index = data.toInt();
         }
     }
 
@@ -385,8 +388,14 @@ void ResourcePage::onVersionSelectionChanged(int index)
     auto current_pack = getCurrentPack();
     if (current_pack && current_pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
         m_selectedVersionIndex = -1;
+        auto data = m_ui->versionSelectionBox->itemData(index);
+        if (data.canConvert<QString>())
+            m_selectedCustomFileName = data.toString();
+        else
+            m_selectedCustomFileName.clear();
     } else {
         m_selectedVersionIndex = m_ui->versionSelectionBox->itemData(index).toInt();
+        m_selectedCustomFileName.clear();
     }
     updateSelectionButton();
 }
@@ -425,9 +434,13 @@ void ResourcePage::onResourceSelected()
 
     int selected_index = m_ui->versionSelectionBox->currentData().toInt();
     if (current_pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
-        auto data = m_ui->versionSelectionBox->currentData();
-        if (data.canConvert<QString>()) {
-            auto file_name = data.toString();
+        auto file_name = m_selectedCustomFileName;
+        if (file_name.isEmpty()) {
+            auto data = m_ui->versionSelectionBox->currentData();
+            if (data.canConvert<QString>())
+                file_name = data.toString();
+        }
+        if (!file_name.isEmpty()) {
             selected_index = -1;
             for (int i = 0; i < current_pack->versions.size(); ++i) {
                 if (current_pack->versions[i].fileName == file_name) {
