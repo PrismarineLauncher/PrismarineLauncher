@@ -1,0 +1,29 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+IDI_ICON1               ICON    DISCARDABLE     "prismlauncher.ico"
+1 RT_MANIFEST "prismlauncher.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     11,0,0,0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+        BLOCK "StringFileInfo"
+        BEGIN
+                BLOCK "000004b0"
+                BEGIN
+                        VALUE "CompanyName", "MultiMC & Amethyst Launcher Contributors"
+                        VALUE "FileDescription", "Amethyst Launcher"
+                        VALUE "FileVersion", "11.0.0.0"
+                        VALUE "ProductName", "Amethyst Launcher"
+                        VALUE "ProductVersion", "11.0.0.0"
+                END
+        END
+        BLOCK "VarFileInfo"
+        BEGIN
+                VALUE "Translation", 0x0000, 0x04b0 // Unicode
+        END
+END
