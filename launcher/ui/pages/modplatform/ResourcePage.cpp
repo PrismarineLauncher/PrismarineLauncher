@@ -624,11 +624,21 @@ void ResourcePage::openUrl(const QUrl& url)
             QListView* view = newPage->m_ui->packView;
 
             auto jump = [url, slug, model, view] {
+                const int fastRow = model->findRowBySlug(slug);
+                if (fastRow >= 0) {
+                    const QModelIndex fastIndex = model->index(fastRow);
+                    const auto pack = model->data(fastIndex, Qt::UserRole).value<ModPlatform::IndexedPack::Ptr>();
+                    if (pack && pack->slug == slug) {
+                        view->setCurrentIndex(fastIndex);
+                        return;
+                    }
+                }
+
                 for (int row = 0; row < model->rowCount({}); row++) {
                     const QModelIndex index = model->index(row);
                     const auto pack = model->data(index, Qt::UserRole).value<ModPlatform::IndexedPack::Ptr>();
 
-                    if (pack->slug == slug) {
+                    if (pack && pack->slug == slug) {
                         view->setCurrentIndex(index);
                         return;
                     }

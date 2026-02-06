@@ -135,7 +135,12 @@ bool ResourceModel::setData(const QModelIndex& index, const QVariant& value, [[m
     if (pos >= m_packs.size() || pos < 0 || !index.isValid())
         return false;
 
+    const auto oldPack = m_packs.at(pos);
     m_packs[pos] = value.value<ModPlatform::IndexedPack::Ptr>();
+    if (oldPack && m_slugToRow.value(oldPack->slug, -1) == pos)
+        m_slugToRow.remove(oldPack->slug);
+    if (m_packs[pos] && !m_packs[pos]->slug.isEmpty())
+        m_slugToRow.insert(m_packs[pos]->slug, pos);
     emit dataChanged(index, index);
 
     return true;
@@ -295,6 +300,7 @@ void ResourceModel::clearData()
 {
     beginResetModel();
     m_packs.clear();
+    m_slugToRow.clear();
     endResetModel();
 }
 
@@ -406,8 +412,14 @@ void ResourceModel::searchRequestSucceeded(QList<ModPlatform::IndexedPack::Ptr>&
     if (filteredNewList.size() == 0)
         return;
 
-    beginInsertRows(QModelIndex(), m_packs.size(), m_packs.size() + filteredNewList.size() - 1);
+    const int begin = m_packs.size();
+    beginInsertRows(QModelIndex(), begin, begin + filteredNewList.size() - 1);
     m_packs.append(filteredNewList);
+    for (int i = 0; i < filteredNewList.size(); i++) {
+        const auto& pack = filteredNewList[i];
+        if (pack && !pack->slug.isEmpty())
+            m_slugToRow.insert(pack->slug, begin + i);
+    }
     endInsertRows();
 }
 
@@ -415,8 +427,11 @@ void ResourceModel::searchRequestForOneSucceeded(ModPlatform::IndexedPack::Ptr p
 {
     m_search_state = SearchState::Finished;
 
-    beginInsertRows(QModelIndex(), m_packs.size(), m_packs.size() + 1);
+    const int row = m_packs.size();
+    beginInsertRows(QModelIndex(), row, row);
     m_packs.append(pack);
+    if (pack && !pack->slug.isEmpty())
+        m_slugToRow.insert(pack->slug, row);
     endInsertRows();
 }
 
@@ -527,5 +542,10 @@ void ResourceModel::removePack(const QString& rem)
 bool ResourceModel::checkVersionFilters(const ModPlatform::IndexedVersion& v)
 {
     return (!optedOut(v));
+}
+
+int ResourceModel::findRowBySlug(const QString& slug) const
+{
+    return m_slugToRow.value(slug, -1);
 }
 }  // namespace ResourceDownload

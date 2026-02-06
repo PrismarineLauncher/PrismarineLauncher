@@ -7,6 +7,7 @@
 #include <optional>
 
 #include <QAbstractListModel>
+#include <QHash>
 
 #include "QObjectPtr.h"
 
@@ -96,6 +97,8 @@ class ResourceModel : public QAbstractListModel {
                  ResourceFolderModel* packs,
                  bool is_indexed = false);
     void removePack(const QString& rem);
+    /** Fast lookup used by URL jump handling. Returns -1 when not found. */
+    int findRowBySlug(const QString& slug) const;
     QList<DownloadTaskPtr> selectedPacks() { return m_selected; }
 
    protected:
@@ -128,6 +131,7 @@ class ResourceModel : public QAbstractListModel {
     QSet<QUrl> m_failed_icon_actions;
 
     QList<ModPlatform::IndexedPack::Ptr> m_packs;
+    QHash<QString, int> m_slugToRow;
     QList<DownloadTaskPtr> m_selected;
 
     // HACK: We need this to prevent callbacks from calling the model after it has already been deleted.
