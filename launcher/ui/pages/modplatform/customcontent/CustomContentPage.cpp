@@ -16,7 +16,9 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGridLayout>
 #include <QHBoxLayout>
+#include <QWidget>
 
 namespace ResourceDownload {
 
@@ -32,10 +34,20 @@ CustomContentModPage::CustomContentModPage(ModDownloadDialog* dialog, BaseInstan
     connect(m_ui->versionSelectionBox, &QComboBox::currentIndexChanged, this, &CustomContentModPage::onVersionSelectionChanged);
     connect(m_ui->resourceSelectionButton, &QPushButton::clicked, this, &CustomContentModPage::onResourceSelected);
 
-    auto addButton = new QPushButton(tr("Add File"), this);
+    auto addButton = new QPushButton(tr("&Add File"), this);
     addButton->setToolTip(tr("Add a local .jar file to Custom Content"));
-    if (auto layout = qobject_cast<QHBoxLayout*>(m_ui->searchEdit->parentWidget()->layout()))
-        layout->addWidget(addButton);
+
+    if (auto grid = qobject_cast<QGridLayout*>(m_ui->gridLayout_4)) {
+        grid->removeWidget(m_ui->sortByBox);
+
+        auto sortContainer = new QWidget(this);
+        auto sortLayout = new QHBoxLayout(sortContainer);
+        sortLayout->setContentsMargins(0, 0, 0, 0);
+        sortLayout->addWidget(m_ui->sortByBox);
+        sortLayout->addWidget(addButton);
+
+        grid->addWidget(sortContainer, 0, 0);
+    }
 
     connect(addButton, &QPushButton::clicked, this, [this] {
         auto file_path = QFileDialog::getOpenFileName(this, tr("Add mod file"), QString(), tr("Java mods (*.jar)"));

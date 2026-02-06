@@ -15,7 +15,7 @@ static inline QString displayName()
 }
 static inline QIcon icon()
 {
-    return QIcon::fromTheme("loadermods");
+    return QIcon::fromTheme("customcontent", QIcon::fromTheme("loadermods"));
 }
 static inline QString id()
 {
