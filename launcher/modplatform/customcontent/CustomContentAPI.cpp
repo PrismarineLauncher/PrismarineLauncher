@@ -7,6 +7,8 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QCryptographicHash>
+#include <QHash>
 #include <QUrl>
 #include <algorithm>
 
@@ -21,6 +23,11 @@ namespace {
 struct LocalPackEntry {
     ModPlatform::IndexedPack::Ptr pack;
     QDateTime modified;
+};
+
+struct GroupEntry {
+    LocalPackEntry entry;
+    QStringList fileNames;
 };
 
 class CustomContentSearchTask final : public Task {
@@ -47,62 +54,86 @@ class CustomContentSearchTask final : public Task {
         if (m_args.search.has_value())
             term = m_args.search.value();
 
+        QHash<QString, GroupEntry> groups;
+
         for (auto const& file_info : files) {
             Mod mod(file_info);
             ModUtils::process(mod, ModUtils::ProcessingLevel::BasicInfoOnly);
 
-            auto pack = std::make_shared<ModPlatform::IndexedPack>();
-            pack->provider = ModPlatform::ResourceProvider::CUSTOM;
-            pack->addonId = file_info.fileName();
-            pack->slug = file_info.completeBaseName();
-            pack->logoName = file_info.fileName();
-            pack->logoUrl = file_info.absoluteFilePath();
-
             QString name = mod.name();
             if (name.isEmpty())
                 name = file_info.completeBaseName();
-            pack->name = name;
 
-            pack->description = mod.description();
-            if (pack->description.isEmpty())
-                pack->description = QObject::tr("Local mod file");
+            auto authors = mod.authors();
+            QString key = name.toLower() + "|" + authors.join(",").toLower();
 
-            for (auto const& author : mod.authors()) {
-                ModPlatform::ModpackAuthor a;
-                a.name = author;
-                pack->authors.append(a);
+            auto& group = groups[key];
+            if (!group.entry.pack) {
+                auto pack = std::make_shared<ModPlatform::IndexedPack>();
+                pack->provider = ModPlatform::ResourceProvider::CUSTOM;
+                pack->addonId = QString::fromUtf8(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
+                pack->slug = name;
+                pack->logoName = file_info.fileName();
+                pack->logoUrl = file_info.absoluteFilePath();
+
+                pack->name = name;
+                pack->description = mod.description();
+                if (pack->description.isEmpty())
+                    pack->description = QObject::tr("Local mod file");
+
+                for (auto const& author : authors) {
+                    ModPlatform::ModpackAuthor a;
+                    a.name = author;
+                    pack->authors.append(a);
+                }
+
+                pack->side = ModPlatform::SideUtils::fromString(mod.side());
+                pack->versionsLoaded = true;
+                pack->extraDataLoaded = true;
+
+                group.entry.pack = pack;
+                group.entry.modified = file_info.lastModified();
+            } else {
+                if (file_info.lastModified() > group.entry.modified)
+                    group.entry.modified = file_info.lastModified();
             }
 
-            pack->side = ModPlatform::SideUtils::fromString(mod.side());
-
             ModPlatform::IndexedVersion version;
-            version.addonId = pack->addonId;
+            version.addonId = group.entry.pack->addonId;
             version.fileId = file_info.fileName();
             version.fileName = file_info.fileName();
             version.downloadUrl = QUrl::fromLocalFile(file_info.absoluteFilePath()).toString();
             version.date = file_info.lastModified().toString(Qt::ISODate);
             version.version_type = ModPlatform::IndexedVersionType::fromString(mod.releaseType());
-            version.side = pack->side;
+            version.side = group.entry.pack->side;
 
             QString version_str = mod.version();
             if (version_str.isEmpty())
                 version_str = file_info.lastModified().toString("yyyy-MM-dd");
-            version.version = version_str;
-            version.version_number = version_str;
+            version.version = QString("%1 [%2]").arg(version_str, file_info.fileName());
+            version.version_number = version.version;
 
-            pack->versionsLoaded = true;
-            pack->versions = { version };
-            pack->extraDataLoaded = true;
+            group.entry.pack->versions.append(version);
+            group.fileNames.append(file_info.fileName());
+        }
 
+        for (auto it = groups.begin(); it != groups.end(); ++it) {
+            auto pack = it.value().entry.pack;
             if (!term.isEmpty()) {
-                auto matches = pack->name.contains(term, Qt::CaseInsensitive) ||
-                               pack->description.contains(term, Qt::CaseInsensitive) ||
-                               file_info.fileName().contains(term, Qt::CaseInsensitive);
+                bool matches = pack->name.contains(term, Qt::CaseInsensitive) ||
+                               pack->description.contains(term, Qt::CaseInsensitive);
+                if (!matches) {
+                    for (auto const& file_name : it.value().fileNames) {
+                        if (file_name.contains(term, Qt::CaseInsensitive)) {
+                            matches = true;
+                            break;
+                        }
+                    }
+                }
                 if (!matches)
                     continue;
             }
-
-            entries.append({ pack, file_info.lastModified() });
+            entries.append(it.value().entry);
         }
 
         auto sort = m_args.sorting;
