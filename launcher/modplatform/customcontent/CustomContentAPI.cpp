@@ -106,6 +106,12 @@ class CustomContentSearchTask final : public Task {
             version.date = file_info.lastModified().toString(Qt::ISODate);
             version.version_type = ModPlatform::IndexedVersionType::fromString(mod.releaseType());
             version.side = group.entry.pack->side;
+            if (auto mc_versions = mod.mcVersions(); !mc_versions.isEmpty()) {
+                auto parts = mc_versions.split(",", Qt::SkipEmptyParts);
+                for (auto& part : parts)
+                    part = part.trimmed();
+                version.mcVersion = parts;
+            }
 
             QString version_str = mod.version();
             if (version_str.isEmpty())

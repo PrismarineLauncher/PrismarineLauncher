@@ -52,8 +52,20 @@
 #include "ui/dialogs/ResourceDownloadDialog.h"
 #include "ui/pages/modplatform/ResourceModel.h"
 #include "ui/widgets/ProjectItem.h"
+#include "minecraft/MinecraftInstance.h"
+#include "minecraft/PackProfile.h"
 
 namespace ResourceDownload {
+namespace {
+QString getInstanceMinecraftVersion(BaseInstance& instance)
+{
+    if (auto mc_instance = qobject_cast<MinecraftInstance*>(&instance)) {
+        if (auto profile = mc_instance->getPackProfile())
+            return profile->getComponentVersion("net.minecraft");
+    }
+    return {};
+}
+}  // namespace
 
 ResourcePage::ResourcePage(ResourceDownloadDialog* parent, BaseInstance& base_instance)
     : QWidget(parent), m_baseInstance(base_instance), m_ui(new Ui::ResourcePage), m_parentDialog(parent), m_fetchProgress(this, false)
@@ -316,6 +328,9 @@ void ResourcePage::versionListUpdated(const QModelIndex& index)
 
         if (current_pack) {
             auto installedVersion = m_model->getInstalledPackVersion(current_pack);
+            const auto instance_mc_version = getInstanceMinecraftVersion(m_baseInstance);
+            int preferred_combo_index = -1;
+            int combo_index = 0;
 
             for (int i = 0; i < current_pack->versions.size(); i++) {
                 auto& version = current_pack->versions[i];
@@ -334,6 +349,31 @@ void ResourcePage::versionListUpdated(const QModelIndex& index)
                     m_ui->versionSelectionBox->addItem(versionText, QVariant(version.fileName));
                 else
                     m_ui->versionSelectionBox->addItem(versionText, QVariant(i));
+
+                if (current_pack->provider == ModPlatform::ResourceProvider::CUSTOM && preferred_combo_index < 0 &&
+                    !instance_mc_version.isEmpty()) {
+                    for (auto const& mc_ver : version.mcVersion) {
+                        if (mc_ver.trimmed() == instance_mc_version) {
+                            preferred_combo_index = combo_index;
+                            break;
+                        }
+                    }
+                }
+
+                combo_index++;
+            }
+
+            if (current_pack->provider == ModPlatform::ResourceProvider::CUSTOM && preferred_combo_index >= 0) {
+                m_ui->versionSelectionBox->blockSignals(true);
+                m_ui->versionSelectionBox->setCurrentIndex(preferred_combo_index);
+                m_ui->versionSelectionBox->blockSignals(false);
+
+                auto data = m_ui->versionSelectionBox->itemData(preferred_combo_index);
+                if (data.canConvert<QString>())
+                    m_selectedCustomFileName = data.toString();
+                else
+                    m_selectedCustomFileName.clear();
+                m_selectedVersionIndex = -1;
             }
         }
         if (m_ui->versionSelectionBox->count() == 0) {
@@ -359,6 +399,11 @@ void ResourcePage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
     }
 
     auto current_pack = getCurrentPack();
+
+    if (current_pack && current_pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
+        m_selectedCustomFileName.clear();
+        m_selectedVersionIndex = -1;
+    }
 
     bool request_load = false;
     if (!current_pack || !current_pack->versionsLoaded) {
