@@ -211,7 +211,7 @@ set(Launcher_TRANSLATION_FILES_URL "https://i18n.prismlauncher.org/" CACHE STRIN
 set(Launcher_MATRIX_URL "https://prismlauncher.org/matrix" CACHE STRING "URL to the Matrix Space")
 
 # Discord URL
-set(Launcher_DISCORD_URL "https://prismlauncher.org/discord" CACHE STRING "URL for the Discord guild.")
+set(Launcher_DISCORD_URL "https://discord.gg/ep3MC4Y9Fr" CACHE STRING "URL for the Discord guild.")
 
 # Subreddit URL
 set(Launcher_SUBREDDIT_URL "https://prismlauncher.org/reddit" CACHE STRING "URL for the subreddit.")

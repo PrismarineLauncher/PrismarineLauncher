@@ -101,7 +101,7 @@
             ```
 
             Feel free to ask any questions in our Discord server or Matrix space:
-              - https://prismlauncher.org/discord
+              - https://discord.gg/ep3MC4Y9Fr
               - https://matrix.to/#/#prismlauncher:matrix.org
 
             And thanks for helping out :)
