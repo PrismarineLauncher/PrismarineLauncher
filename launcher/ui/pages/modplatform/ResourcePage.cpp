@@ -388,14 +388,15 @@ void ResourcePage::removeResourceFromPage(const QString& name)
 
 void ResourcePage::onResourceSelected()
 {
-    if (m_selectedVersionIndex < 0)
+    auto selected_index = m_ui->versionSelectionBox->currentData().toInt();
+    if (selected_index < 0)
         return;
 
     auto current_pack = getCurrentPack();
-    if (!current_pack || !current_pack->versionsLoaded || current_pack->versions.size() < m_selectedVersionIndex)
+    if (!current_pack || !current_pack->versionsLoaded || current_pack->versions.size() <= selected_index)
         return;
 
-    auto& version = current_pack->versions[m_selectedVersionIndex];
+    auto& version = current_pack->versions[selected_index];
     Q_ASSERT(!version.downloadUrl.isNull());
     if (version.is_currently_selected)
         removeResourceFromDialog(current_pack->name);
