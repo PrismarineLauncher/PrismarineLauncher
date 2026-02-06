@@ -15,6 +15,8 @@
 
 #include "Application.h"
 #include "BuildConfig.h"
+#include "minecraft/mod/Mod.h"
+#include "minecraft/mod/tasks/LocalModParseTask.h"
 
 #include "modplatform/ResourceAPI.h"
 #include "net/ApiDownload.h"
@@ -61,6 +63,25 @@ auto ResourceModel::data(const QModelIndex& index, int role) const -> QVariant
         }
         case Qt::DecorationRole: {
             if (APPLICATION_DYN) {
+                if (pack->provider == ModPlatform::ResourceProvider::CUSTOM) {
+                    auto key = QString("customcontent:%1").arg(pack->logoUrl);
+                    QPixmap pixmap;
+                    if (QPixmapCache::find(key, &pixmap))
+                        return QIcon(pixmap);
+
+                    QFileInfo file_info(pack->logoUrl);
+                    if (file_info.exists()) {
+                        Mod mod(file_info);
+                        ModUtils::process(mod, ModUtils::ProcessingLevel::BasicInfoOnly);
+                        auto icon = mod.icon({ 64, 64 }, Qt::AspectRatioMode::KeepAspectRatio);
+                        if (!icon.isNull()) {
+                            QPixmapCache::insert(key, icon);
+                            return QIcon(icon);
+                        }
+                    }
+
+                    return QIcon::fromTheme("loadermods");
+                }
                 if (auto icon_or_none = const_cast<ResourceModel*>(this)->getIcon(const_cast<QModelIndex&>(index), pack->logoUrl);
                     icon_or_none.has_value())
                     return icon_or_none.value();

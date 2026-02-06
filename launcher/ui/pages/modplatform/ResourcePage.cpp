@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-only AND Apache-2.0
 /*
- *  Prism Launcher - Minecraft Launcher
+ *  Amethyst Launcher - Minecraft Launcher
  *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
  *  Copyright (C) 2023 TheKodeToad <TheKodeToad@proton.me>
  *  Copyright (c) 2023 Trial97 <alexandru.tripon97@gmail.com>
@@ -426,12 +426,16 @@ void ResourcePage::onResourceToggle(const QModelIndex& index)
             });
 
             if (version == pack->versions.end()) {
-                auto errorMessage = new QMessageBox(
-                    QMessageBox::Warning, tr("No versions available"),
-                    tr("No versions for '%1' are available.\nThe author likely blocked third-party launchers.").arg(pack->name),
-                    QMessageBox::Ok, this);
+                if (!pack->versions.isEmpty()) {
+                    addResourceToDialog(pack, pack->versions.first());
+                } else {
+                    auto errorMessage = new QMessageBox(
+                        QMessageBox::Warning, tr("No versions available"),
+                        tr("No versions for '%1' are available.").arg(pack->name),
+                        QMessageBox::Ok, this);
 
-                errorMessage->open();
+                    errorMessage->open();
+                }
             } else
                 addResourceToDialog(pack, *version);
         }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- *  Prism Launcher - Minecraft Launcher
+ *  Amethyst Launcher - Minecraft Launcher
  *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
  *  Copyright (C) 2023 TheKodeToad <TheKodeToad@proton.me>
  *
@@ -40,6 +40,7 @@
 
 #include "ui/pages/modplatform/ResourcePage.h"
 
+#include "ui/pages/modplatform/customcontent/CustomContentPage.h"
 #include "ui/pages/modplatform/flame/FlameResourcePages.h"
 #include "ui/pages/modplatform/modrinth/ModrinthResourcePages.h"
 
@@ -289,6 +290,9 @@ QList<BasePage*> ModDownloadDialog::getPages()
 
     if (ModrinthAPI::validateModLoaders(loaders))
         pages.append(ModrinthModPage::create(this, *m_instance));
+    if (ModrinthAPI::validateModLoaders(loaders))
+        pages.append(DavidModPage::create(this, *m_instance));
+    pages.append(CustomContentModPage::create(this, *m_instance));
     if (APPLICATION->capabilities() & Application::SupportsFlame && FlameAPI::validateModLoaders(loaders))
         pages.append(FlameModPage::create(this, *m_instance));
 
@@ -385,6 +389,9 @@ void ResourceDownloadDialog::setResourceMetadata(const std::shared_ptr<Metadata:
             break;
         case ModPlatform::ResourceProvider::FLAME:
             selectPage(Flame::id());
+            break;
+        case ModPlatform::ResourceProvider::CUSTOM:
+            selectPage(CustomContent::id());
             break;
     }
     setWindowTitle(tr("Change %1 version").arg(meta->name));

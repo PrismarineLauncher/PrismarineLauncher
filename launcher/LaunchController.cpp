@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- *  Prism Launcher - Minecraft Launcher
+ *  Amethyst Launcher - Minecraft Launcher
  *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
  *  Copyright (C) 2023 TheKodeToad <TheKodeToad@proton.me>
  *
@@ -89,21 +89,8 @@ void LaunchController::decideAccount()
     // Find an account to use.
     auto accounts = APPLICATION->accounts();
     if (accounts->count() <= 0 || !accounts->anyAccountIsValid()) {
-        // Tell the user they need to log in at least one account in order to play.
-        auto reply = CustomMessageBox::selectable(m_parentWidget, tr("No Accounts"),
-                                                  tr("In order to play Minecraft, you must have at least one Microsoft "
-                                                     "account which owns Minecraft logged in. "
-                                                     "Would you like to open the account manager to add an account now?"),
-                                                  QMessageBox::Information, QMessageBox::Yes | QMessageBox::No)
-                         ->exec();
-
-        if (reply == QMessageBox::Yes) {
-            // Open the account manager.
-            APPLICATION->ShowGlobalSettings(m_parentWidget, "accounts");
-        } else if (reply == QMessageBox::No) {
-            // Do not open "profile select" dialog.
-            return;
-        }
+        // Allow offline launch without requiring a Microsoft account.
+        return;
     }
 
     // Select the account to use. If the instance has a specific account set, that will be used. Otherwise, the default account will be used
@@ -185,23 +172,22 @@ void LaunchController::login()
     decideAccount();
 
     if (!m_accountToUse) {
-        // if no account is selected, ask about demo
-        if (!m_demo) {
-            m_demo = askPlayDemo();
+        // Allow offline launch without requiring a Microsoft account.
+        bool ok = false;
+        QString name;
+        if (m_offlineName.isEmpty()) {
+            name = askOfflineName("Player", false, &ok);
+        } else {
+            name = m_offlineName;
+            ok = !name.isEmpty();
         }
-        if (m_demo) {
-            // we ask the user for a player name
-            bool ok = false;
-            auto name = askOfflineName("Player", m_demo, &ok);
-            if (ok) {
-                m_session = std::make_shared<AuthSession>();
-                static const QRegularExpression s_removeChars("[{}-]");
-                m_session->MakeDemo(name, MinecraftAccount::uuidFromUsername(name).toString().remove(s_removeChars));
-                launchInstance();
-                return;
-            }
+        if (ok) {
+            m_session = std::make_shared<AuthSession>();
+            m_session->MakeOffline(name);
+            m_session->wants_online = false;
+            launchInstance();
+            return;
         }
-        // if no account is selected, we bail
         emitFailed(tr("No account selected for launch."));
         return;
     }

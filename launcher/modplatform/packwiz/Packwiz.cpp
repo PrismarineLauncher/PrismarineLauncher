@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- *  Prism Launcher - Minecraft Launcher
+ *  Amethyst Launcher - Minecraft Launcher
  *  Copyright (c) 2022 flowln <flowlnlnln@gmail.com>
  *  Copyright (c) 2023 Trial97 <alexandru.tripon97@gmail.com>
  *
@@ -175,6 +175,15 @@ void V1::updateModIndex(const QDir& index_dir, Mod& mod)
                 { "version", mod.version().toString().toStdString() },
             };
             break;
+        case (ModPlatform::ResourceProvider::CUSTOM):
+            if (mod.project_id.toString().isEmpty()) {
+                qCritical() << QString("Did not write file %1 because missing information!").arg(normalized_fname);
+                return;
+            }
+            update = toml::table{
+                { "project-id", mod.project_id.toString().toStdString() },
+            };
+            break;
     }
 
     toml::array loaders;
@@ -337,6 +346,9 @@ auto V1::getIndexForMod(const QDir& index_dir, QString slug) -> Mod
             mod.provider = Provider::MODRINTH;
             mod.mod_id() = stringEntry(*mod_provider_table, "mod-id");
             mod.version() = stringEntry(*mod_provider_table, "version");
+        } else if ((mod_provider_table = update_table[ModPlatform::ProviderCapabilities::name(Provider::CUSTOM)].as_table())) {
+            mod.provider = Provider::CUSTOM;
+            mod.project_id = stringEntry(*mod_provider_table, "project-id");
         } else {
             qCritical() << QString("No mod provider on mod metadata!");
             return {};

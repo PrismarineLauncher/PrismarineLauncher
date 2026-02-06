@@ -497,6 +497,8 @@ set(API_SOURCES
 
     modplatform/ResourceAPI.h
     modplatform/ResourceAPI.cpp
+    modplatform/customcontent/CustomContentAPI.h
+    modplatform/customcontent/CustomContentAPI.cpp
 
     modplatform/EnsureMetadataTask.h
     modplatform/EnsureMetadataTask.cpp
@@ -985,6 +987,9 @@ SET(LAUNCHER_SOURCES
     ui/pages/modplatform/ModPage.h
     ui/pages/modplatform/ModModel.cpp
     ui/pages/modplatform/ModModel.h
+    ui/pages/modplatform/customcontent/CustomContentModel.h
+    ui/pages/modplatform/customcontent/CustomContentPage.cpp
+    ui/pages/modplatform/customcontent/CustomContentPage.h
 
     ui/pages/modplatform/ResourcePackPage.cpp
     ui/pages/modplatform/ResourcePackModel.cpp

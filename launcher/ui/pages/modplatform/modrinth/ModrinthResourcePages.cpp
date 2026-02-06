@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- *  Prism Launcher - Minecraft Launcher
+ *  Amethyst Launcher - Minecraft Launcher
  *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
  *  Copyright (c) 2023 Trial97 <alexandru.tripon97@gmail.com>
  *
@@ -62,6 +62,8 @@ ModrinthModPage::ModrinthModPage(ModDownloadDialog* dialog, BaseInstance& instan
 
     m_ui->packDescription->setMetaEntry(metaEntryBase());
 }
+
+DavidModPage::DavidModPage(ModDownloadDialog* dialog, BaseInstance& instance) : ModrinthModPage(dialog, instance) {}
 
 ModrinthResourcePackPage::ModrinthResourcePackPage(ResourcePackDownloadDialog* dialog, BaseInstance& instance)
     : ResourcePackResourcePage(dialog, instance)

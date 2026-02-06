@@ -15,7 +15,7 @@ BEGIN
         BEGIN
                 BLOCK "000004b0"
                 BEGIN
-                        VALUE "CompanyName", "MultiMC & Prism Launcher Contributors"
+                        VALUE "CompanyName", "MultiMC & Amethyst Launcher Contributors"
                         VALUE "FileDescription", "@Launcher_DisplayName@"
                         VALUE "FileVersion", "@Launcher_VERSION_NAME4@"
                         VALUE "ProductName", "@Launcher_DisplayName@"

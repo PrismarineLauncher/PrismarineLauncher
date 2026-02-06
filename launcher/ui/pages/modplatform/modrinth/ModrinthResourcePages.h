@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: GPL-3.0-only AND Apache-2.0
 /*
- *  Prism Launcher - Minecraft Launcher
+ *  Amethyst Launcher - Minecraft Launcher
  *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
  *  Copyright (c) 2023 Trial97 <alexandru.tripon97@gmail.com>
  *
@@ -71,6 +71,29 @@ static inline QString metaEntryBase()
 }
 }  // namespace Modrinth
 
+namespace David {
+static inline QString displayName()
+{
+    return "David";
+}
+static inline QIcon icon()
+{
+    return QIcon::fromTheme("modrinth");
+}
+static inline QString id()
+{
+    return "david";
+}
+static inline QString debugName()
+{
+    return Modrinth::debugName();
+}
+static inline QString metaEntryBase()
+{
+    return Modrinth::metaEntryBase();
+}
+}  // namespace David
+
 class ModrinthModPage : public ModPage {
     Q_OBJECT
 
@@ -98,6 +121,25 @@ class ModrinthModPage : public ModPage {
    protected:
     virtual void prepareProviderCategories() override;
     Task::Ptr m_categoriesTask;
+};
+
+class DavidModPage : public ModrinthModPage {
+    Q_OBJECT
+
+   public:
+    static DavidModPage* create(ModDownloadDialog* dialog, BaseInstance& instance)
+    {
+        return ModPage::create<DavidModPage>(dialog, instance);
+    }
+
+    DavidModPage(ModDownloadDialog* dialog, BaseInstance& instance);
+    ~DavidModPage() override = default;
+
+    inline auto displayName() const -> QString override { return David::displayName(); }
+    inline auto icon() const -> QIcon override { return David::icon(); }
+    inline auto id() const -> QString override { return David::id(); }
+    inline auto debugName() const -> QString override { return David::debugName(); }
+    inline auto metaEntryBase() const -> QString override { return David::metaEntryBase(); }
 };
 
 class ModrinthResourcePackPage : public ResourcePackResourcePage {
