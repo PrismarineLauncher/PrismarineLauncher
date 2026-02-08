@@ -46,6 +46,7 @@
 
 #include "modplatform/flame/FlameAPI.h"
 #include "modplatform/modrinth/ModrinthAPI.h"
+#include "modplatform/customcontent/CustomTabConfig.h"
 #include "ui/widgets/PageContainer.h"
 
 namespace ResourceDownload {
@@ -293,6 +294,9 @@ QList<BasePage*> ModDownloadDialog::getPages()
     if (ModrinthAPI::validateModLoaders(loaders))
         pages.append(DavidModPage::create(this, *m_instance));
     pages.append(CustomContentModPage::create(this, *m_instance));
+    auto customTabs = CustomContentTabs::loadFromDataRoot(APPLICATION->dataRoot());
+    for (auto const& tab : customTabs)
+        pages.append(CustomContentModPage::create(this, *m_instance, tab));
     if (APPLICATION->capabilities() & Application::SupportsFlame && FlameAPI::validateModLoaders(loaders))
         pages.append(FlameModPage::create(this, *m_instance));
 
@@ -391,6 +395,13 @@ void ResourceDownloadDialog::setResourceMetadata(const std::shared_ptr<Metadata:
             selectPage(Flame::id());
             break;
         case ModPlatform::ResourceProvider::CUSTOM:
+            if (auto projectId = meta->project_id.toString(); projectId.startsWith("customtab:")) {
+                auto parts = projectId.split(':');
+                if (parts.size() >= 3) {
+                    if (selectPage(parts[1]))
+                        break;
+                }
+            }
             selectPage(CustomContent::id());
             break;
     }

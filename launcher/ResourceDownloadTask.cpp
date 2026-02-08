@@ -28,6 +28,8 @@
 #include "modplatform/helpers/HashUtils.h"
 #include "net/ApiDownload.h"
 #include "net/ChecksumValidator.h"
+#include <QFile>
+#include <QRandomGenerator>
 #include <QUrl>
 
 ResourceDownloadTask::ResourceDownloadTask(ModPlatform::IndexedPack::Ptr pack,
@@ -46,11 +48,17 @@ ResourceDownloadTask::ResourceDownloadTask(ModPlatform::IndexedPack::Ptr pack,
     m_filesNetJob.reset(new NetJob(tr("Resource download"), APPLICATION->network()));
     m_filesNetJob->setStatus(tr("Downloading resource:\n%1").arg(m_pack_version.downloadUrl));
 
+    m_downloadTargetPath = m_pack_model->dir().absoluteFilePath(getFilename());
+    auto tempSuffix = QString::number(QRandomGenerator::global()->generate64(), 16);
+    m_tempDownloadPath = m_pack_model->dir().absoluteFilePath(QString(".%1.part-%2").arg(getFilename(), tempSuffix));
+    if (QFile::exists(m_tempDownloadPath))
+        QFile::remove(m_tempDownloadPath);
+
     QUrl download_url(m_pack_version.downloadUrl);
     Net::Download::Options options = Net::Download::Option::NoOptions;
     if (download_url.isLocalFile())
         options |= Net::Download::Option::AcceptLocalFiles;
-    auto action = Net::ApiDownload::makeFile(download_url, m_pack_model->dir().absoluteFilePath(getFilename()), options);
+    auto action = Net::ApiDownload::makeFile(download_url, m_tempDownloadPath, options);
     if (!m_pack_version.hash_type.isEmpty() && !m_pack_version.hash.isEmpty()) {
         switch (Hashing::algorithmFromString(m_pack_version.hash_type)) {
             case Hashing::Algorithm::Md4:
@@ -84,6 +92,17 @@ ResourceDownloadTask::ResourceDownloadTask(ModPlatform::IndexedPack::Ptr pack,
 void ResourceDownloadTask::downloadSucceeded()
 {
     m_filesNetJob.reset();
+
+    if (QFile::exists(m_downloadTargetPath) && !QFile::remove(m_downloadTargetPath)) {
+        emitFailed(tr("Failed to replace existing file '%1'.").arg(getFilename()));
+        return;
+    }
+
+    if (!FS::move(m_tempDownloadPath, m_downloadTargetPath)) {
+        emitFailed(tr("Failed to move downloaded file into place for '%1'.").arg(getFilename()));
+        return;
+    }
+
     auto oldName = std::get<0>(to_delete);
     auto oldFilename = std::get<1>(to_delete);
 
@@ -108,6 +127,8 @@ void ResourceDownloadTask::downloadSucceeded()
 
 void ResourceDownloadTask::downloadFailed(QString reason)
 {
+    if (!m_tempDownloadPath.isEmpty() && QFile::exists(m_tempDownloadPath))
+        QFile::remove(m_tempDownloadPath);
     m_filesNetJob.reset();
     emitFailed(reason);
 }

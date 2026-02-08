@@ -10,8 +10,9 @@
 
 #include "Application.h"
 #include "FileSystem.h"
-#include "ui/dialogs/ResourceDownloadDialog.h"
+#include "minecraft/MinecraftInstance.h"
 #include "ui/dialogs/CustomMessageBox.h"
+#include "ui/dialogs/ResourceDownloadDialog.h"
 
 #include <QFile>
 #include <QFileDialog>
@@ -24,7 +25,28 @@ namespace ResourceDownload {
 
 CustomContentModPage::CustomContentModPage(ModDownloadDialog* dialog, BaseInstance& instance) : ModPage(dialog, instance)
 {
-    m_model = new CustomContentModel(instance, new CustomContentAPI(), CustomContent::debugName(), CustomContent::metaEntryBase());
+    initializePage();
+}
+
+CustomContentModPage::CustomContentModPage(ModDownloadDialog* dialog, BaseInstance& instance, CustomContentTabs::TabDefinition tab)
+    : ModPage(dialog, instance), m_tab(std::move(tab))
+{
+    m_displayName = m_tab->name;
+    m_icon = QIcon();
+    m_id = m_tab->id;
+    m_debugName = QString("CustomContent.%1").arg(m_tab->id);
+    m_metaEntryBase = QString("CustomContentPacks.%1").arg(m_tab->id);
+
+    initializePage();
+}
+
+void CustomContentModPage::initializePage()
+{
+    if (m_tab.has_value())
+        m_model = new CustomContentModel(m_baseInstance, new CustomContentAPI(*m_tab), debugName(), metaEntryBase());
+    else
+        m_model = new CustomContentModel(m_baseInstance, new CustomContentAPI(), debugName(), metaEntryBase());
+
     m_ui->packView->setModel(m_model);
 
     addSortings();
@@ -34,6 +56,14 @@ CustomContentModPage::CustomContentModPage(ModDownloadDialog* dialog, BaseInstan
     connect(m_ui->versionSelectionBox, &QComboBox::currentIndexChanged, this, &CustomContentModPage::onVersionSelectionChanged);
     connect(m_ui->resourceSelectionButton, &QPushButton::clicked, this, &CustomContentModPage::onResourceSelected);
 
+    if (!m_tab.has_value())
+        setupAddButton();
+
+    m_ui->packDescription->setMetaEntry(metaEntryBase());
+}
+
+void CustomContentModPage::setupAddButton()
+{
     auto addButton = new QPushButton(tr("&Add File"), this);
     addButton->setToolTip(tr("Add a local .jar file to Custom Content"));
 
@@ -87,8 +117,6 @@ CustomContentModPage::CustomContentModPage(ModDownloadDialog* dialog, BaseInstan
 
         triggerSearch();
     });
-
-    m_ui->packDescription->setMetaEntry(metaEntryBase());
 }
 
 auto CustomContentModPage::shouldDisplay() const -> bool

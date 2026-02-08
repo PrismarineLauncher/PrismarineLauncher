@@ -45,6 +45,8 @@ class ResourceDownloadTask : public SequentialTask {
     ModPlatform::IndexedPack::Ptr m_pack;
     ModPlatform::IndexedVersion m_pack_version;
     ResourceFolderModel* m_pack_model;
+    QString m_downloadTargetPath;
+    QString m_tempDownloadPath;
 
     NetJob::Ptr m_filesNetJob;
     LocalResourceUpdateTask::Ptr m_update_task;

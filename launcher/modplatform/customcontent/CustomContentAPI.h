@@ -4,10 +4,16 @@
 
 #pragma once
 
+#include <optional>
+
 #include "modplatform/ResourceAPI.h"
+#include "modplatform/customcontent/CustomTabConfig.h"
 
 class CustomContentAPI final : public ResourceAPI {
    public:
+    CustomContentAPI() = default;
+    explicit CustomContentAPI(CustomContentTabs::TabDefinition tab) : m_tab(std::move(tab)) {}
+
     auto getSortingMethods() const -> QList<SortingMethod> override;
 
     Task::Ptr searchProjects(SearchArgs&&, Callback<QList<ModPlatform::IndexedPack::Ptr>>&&) const override;
@@ -23,4 +29,7 @@ class CustomContentAPI final : public ResourceAPI {
     ModPlatform::IndexedVersion loadIndexedPackVersion(QJsonObject& obj, ModPlatform::ResourceType) const override;
     QJsonArray documentToArray(QJsonDocument& obj) const override;
     void loadExtraPackInfo(ModPlatform::IndexedPack&, QJsonObject&) const override;
+
+   private:
+    std::optional<CustomContentTabs::TabDefinition> m_tab;
 };

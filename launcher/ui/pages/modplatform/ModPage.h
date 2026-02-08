@@ -5,6 +5,7 @@
 #pragma once
 
 #include <QWidget>
+#include <utility>
 
 #include "modplatform/ModIndex.h"
 
@@ -25,10 +26,10 @@ class ModPage : public ResourcePage {
     Q_OBJECT
 
    public:
-    template <typename T>
-    static T* create(ModDownloadDialog* dialog, BaseInstance& instance)
+    template <typename T, typename... Args>
+    static T* create(ModDownloadDialog* dialog, BaseInstance& instance, Args&&... args)
     {
-        auto page = new T(dialog, instance);
+        auto page = new T(dialog, instance, std::forward<Args>(args)...);
         auto model = static_cast<ModModel*>(page->getModel());
 
         auto filter_widget = page->createFilterWidget();

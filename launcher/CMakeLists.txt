@@ -499,6 +499,8 @@ set(API_SOURCES
     modplatform/ResourceAPI.cpp
     modplatform/customcontent/CustomContentAPI.h
     modplatform/customcontent/CustomContentAPI.cpp
+    modplatform/customcontent/CustomTabConfig.h
+    modplatform/customcontent/CustomTabConfig.cpp
 
     modplatform/EnsureMetadataTask.h
     modplatform/EnsureMetadataTask.cpp
