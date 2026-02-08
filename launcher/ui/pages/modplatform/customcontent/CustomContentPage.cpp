@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QDir>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QWidget>
@@ -32,7 +33,16 @@ CustomContentModPage::CustomContentModPage(ModDownloadDialog* dialog, BaseInstan
     : ModPage(dialog, instance), m_tab(std::move(tab))
 {
     m_displayName = m_tab->name;
-    m_icon = QIcon();
+    if (!m_tab->iconPath.isEmpty()) {
+        QFileInfo source_file(m_tab->sourcePath);
+        const auto tab_icon_path = QDir(source_file.absolutePath()).absoluteFilePath(m_tab->iconPath);
+        if (QFileInfo::exists(tab_icon_path))
+            m_icon = QIcon(tab_icon_path);
+        else
+            m_icon = QIcon();
+    } else {
+        m_icon = QIcon();
+    }
     m_id = m_tab->id;
     m_debugName = QString("CustomContent.%1").arg(m_tab->id);
     m_metaEntryBase = QString("CustomContentPacks.%1").arg(m_tab->id);

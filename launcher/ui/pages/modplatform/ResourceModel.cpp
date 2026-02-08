@@ -5,10 +5,13 @@
 #include "ResourceModel.h"
 
 #include <QCryptographicHash>
+#include <QFileInfo>
 #include <QIcon>
+#include <QImageReader>
 #include <QList>
 #include <QMessageBox>
 #include <QPixmapCache>
+#include <QSet>
 #include <QUrl>
 #include <algorithm>
 #include <memory>
@@ -71,12 +74,29 @@ auto ResourceModel::data(const QModelIndex& index, int role) const -> QVariant
 
                     QFileInfo file_info(pack->logoUrl);
                     if (file_info.exists()) {
-                        Mod mod(file_info);
-                        ModUtils::process(mod, ModUtils::ProcessingLevel::BasicInfoOnly);
-                        auto icon = mod.icon({ 64, 64 }, Qt::AspectRatioMode::KeepAspectRatio);
-                        if (!icon.isNull()) {
-                            QPixmapCache::insert(key, icon);
-                            return QIcon(icon);
+                        static const auto imageFormats = [] {
+                            QSet<QString> formats;
+                            for (auto const& fmt : QImageReader::supportedImageFormats()) {
+                                formats.insert(QString::fromLatin1(fmt).toLower());
+                            }
+                            return formats;
+                        }();
+
+                        if (imageFormats.contains(file_info.suffix().toLower())) {
+                            QIcon icon(file_info.absoluteFilePath());
+                            auto pix = icon.pixmap({ 64, 64 });
+                            if (!pix.isNull()) {
+                                QPixmapCache::insert(key, pix);
+                                return icon;
+                            }
+                        } else {
+                            Mod mod(file_info);
+                            ModUtils::process(mod, ModUtils::ProcessingLevel::BasicInfoOnly);
+                            auto icon = mod.icon({ 64, 64 }, Qt::AspectRatioMode::KeepAspectRatio);
+                            if (!icon.isNull()) {
+                                QPixmapCache::insert(key, icon);
+                                return QIcon(icon);
+                            }
                         }
                     }
 

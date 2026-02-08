@@ -65,6 +65,47 @@ QString takeString(const QJsonValue& value)
     return value.isString() ? value.toString() : QString();
 }
 
+QStringList readYamlLiteralBlock(const QStringList& lines, int& index, int indentSpaces)
+{
+    QStringList body;
+    const QString indent(indentSpaces, ' ');
+
+    while (index < lines.size()) {
+        const auto line = lines[index];
+        if (line.trimmed().isEmpty()) {
+            body << "";
+            index++;
+            continue;
+        }
+        if (!line.startsWith(indent))
+            break;
+
+        body << line.mid(indentSpaces);
+        index++;
+    }
+
+    return body;
+}
+
+QString humanizeSlug(QString slug)
+{
+    slug = trimQuotes(slug).trimmed();
+    slug.replace(QRegularExpression("[-_.]+"), " ");
+    slug.replace(QRegularExpression("\\s+"), " ");
+    slug = slug.trimmed();
+
+    if (slug.isEmpty())
+        return {};
+
+    auto words = slug.split(' ', Qt::SkipEmptyParts);
+    for (auto& word : words) {
+        word = word.toLower();
+        if (!word.isEmpty())
+            word[0] = word[0].toUpper();
+    }
+    return words.join(' ');
+}
+
 VersionEntry parseJsonVersion(const QString& versionId, const QJsonValue& value)
 {
     VersionEntry version;
@@ -100,6 +141,7 @@ TabDefinition parseJson(const QFileInfo& fileInfo, const QByteArray& data)
 
     auto root = document.object();
     tab.name = takeString(root.value("name"));
+    tab.iconPath = takeString(root.value("icon"));
 
     auto readmeObj = root.value("readme").toObject();
     if (!readmeObj.isEmpty()) {
@@ -113,15 +155,23 @@ TabDefinition parseJson(const QFileInfo& fileInfo, const QByteArray& data)
     for (auto it = contentObj.constBegin(); it != contentObj.constEnd(); ++it) {
         ContentEntry entry;
         entry.slug = it.key();
-        entry.name = entry.slug;
+        entry.name = humanizeSlug(entry.slug);
+        entry.readmeType = "markdown";
 
         auto entryObj = it.value().toObject();
         if (entryObj.contains("name"))
             entry.name = takeString(entryObj.value("name"));
         entry.description = takeString(entryObj.value("description"));
+        entry.iconPath = takeString(entryObj.value("icon"));
+        if (auto entryReadmeObj = entryObj.value("readme").toObject(); !entryReadmeObj.isEmpty()) {
+            auto entryReadmeType = takeString(entryReadmeObj.value("type"));
+            if (!entryReadmeType.isEmpty())
+                entry.readmeType = entryReadmeType;
+            entry.readmeContent = takeString(entryReadmeObj.value("content"));
+        }
 
         for (auto vit = entryObj.constBegin(); vit != entryObj.constEnd(); ++vit) {
-            if (vit.key() == "name" || vit.key() == "description")
+            if (vit.key() == "name" || vit.key() == "description" || vit.key() == "icon" || vit.key() == "readme")
                 continue;
             auto version = parseJsonVersion(vit.key(), vit.value());
             if (!version.url.isEmpty())
@@ -194,6 +244,7 @@ TabDefinition parseToml(const QFileInfo& fileInfo)
 #endif
 
     tab.name = tomlString(root.get("name"));
+    tab.iconPath = tomlString(root.get("icon"));
 
     if (auto readme = root["readme"].as_table()) {
         auto type = tomlString(readme->get("type"));
@@ -211,15 +262,23 @@ TabDefinition parseToml(const QFileInfo& fileInfo)
 
             ContentEntry entry;
             entry.slug = slug;
-            entry.name = slug;
+            entry.name = humanizeSlug(slug);
+            entry.readmeType = "markdown";
 
             if (auto n = tomlString(slugTable->get("name")); !n.isEmpty())
                 entry.name = n;
             entry.description = tomlString(slugTable->get("description"));
+            entry.iconPath = tomlString(slugTable->get("icon"));
+            if (auto entryReadme = (*slugTable)["readme"].as_table()) {
+                auto type = tomlString(entryReadme->get("type"));
+                if (!type.isEmpty())
+                    entry.readmeType = type;
+                entry.readmeContent = tomlString(entryReadme->get("content"));
+            }
 
             for (auto&& [versionKey, versionNode] : *slugTable) {
                 auto versionId = QString::fromStdString(std::string(versionKey));
-                if (versionId == "name" || versionId == "description")
+                if (versionId == "name" || versionId == "description" || versionId == "icon" || versionId == "readme")
                     continue;
 
                 auto version = parseTomlVersion(versionId, &versionNode);
@@ -264,6 +323,12 @@ bool parseYaml(const QFileInfo& fileInfo, const QByteArray& data, TabDefinition&
             continue;
         }
 
+        if (trimmed.startsWith("icon:")) {
+            out.iconPath = trimQuotes(trimmed.mid(5).trimmed());
+            i++;
+            continue;
+        }
+
         if (trimmed == "readme:") {
             i++;
             while (i < lineCount) {
@@ -283,13 +348,7 @@ bool parseYaml(const QFileInfo& fileInfo, const QByteArray& data, TabDefinition&
                     i++;
                     QStringList body;
                     if (contentDecl == "|" || contentDecl == "|-") {
-                        while (i < lineCount) {
-                            auto bodyLine = lines[i];
-                            if (!bodyLine.startsWith("    "))
-                                break;
-                            body << bodyLine.mid(4);
-                            i++;
-                        }
+                        body = readYamlLiteralBlock(lines, i, 4);
                     } else {
                         body << trimQuotes(contentDecl);
                     }
@@ -305,6 +364,10 @@ bool parseYaml(const QFileInfo& fileInfo, const QByteArray& data, TabDefinition&
             i++;
             while (i < lineCount) {
                 auto slugRaw = lines[i];
+                if (slugRaw.trimmed().isEmpty()) {
+                    i++;
+                    continue;
+                }
                 if (!slugRaw.startsWith("  ") || slugRaw.startsWith("    "))
                     break;
 
@@ -316,36 +379,84 @@ bool parseYaml(const QFileInfo& fileInfo, const QByteArray& data, TabDefinition&
 
                 ContentEntry entry;
                 entry.slug = trimQuotes(slugLine.left(slugLine.size() - 1).trimmed());
-                entry.name = entry.slug;
+                entry.name = humanizeSlug(entry.slug);
+                entry.readmeType = "markdown";
                 i++;
 
                 while (i < lineCount) {
                     auto verRaw = lines[i];
+                    if (verRaw.trimmed().isEmpty()) {
+                        i++;
+                        continue;
+                    }
                     if (!verRaw.startsWith("    ") || verRaw.startsWith("      "))
                         break;
 
                     auto verLine = verRaw.trimmed();
+                    if (verLine.startsWith("name:")) {
+                        auto value = trimQuotes(verLine.mid(5).trimmed());
+                        if (!value.isEmpty())
+                            entry.name = value;
+                        i++;
+                        continue;
+                    }
+                    if (verLine.startsWith("description:")) {
+                        entry.description = trimQuotes(verLine.mid(12).trimmed());
+                        i++;
+                        continue;
+                    }
+                    if (verLine.startsWith("icon:")) {
+                        entry.iconPath = trimQuotes(verLine.mid(5).trimmed());
+                        i++;
+                        continue;
+                    }
+                    if (verLine == "readme:") {
+                        i++;
+                        while (i < lineCount) {
+                            auto readmeRaw = lines[i];
+                            if (!readmeRaw.startsWith("      "))
+                                break;
+                            auto readmeLine = readmeRaw.trimmed();
+                            if (readmeLine.startsWith("type:")) {
+                                auto type = trimQuotes(readmeLine.mid(5).trimmed());
+                                if (!type.isEmpty())
+                                    entry.readmeType = type;
+                                i++;
+                                continue;
+                            }
+                            if (readmeLine.startsWith("content:")) {
+                                auto contentDecl = readmeLine.mid(8).trimmed();
+                                i++;
+                                QStringList body;
+                                if (contentDecl == "|" || contentDecl == "|-") {
+                                    body = readYamlLiteralBlock(lines, i, 8);
+                                } else {
+                                    body << trimQuotes(contentDecl);
+                                }
+                                entry.readmeContent = body.join('\n');
+                                continue;
+                            }
+                            i++;
+                        }
+                        continue;
+                    }
+
                     if (!verLine.endsWith(':')) {
                         i++;
                         continue;
                     }
 
                     auto key = trimQuotes(verLine.left(verLine.size() - 1).trimmed());
-                    if (key == "name") {
-                        i++;
-                        continue;
-                    }
-                    if (key == "description") {
-                        i++;
-                        continue;
-                    }
-
                     VersionEntry version;
                     version.id = key;
                     i++;
 
                     while (i < lineCount) {
                         auto urlRaw = lines[i];
+                        if (urlRaw.trimmed().isEmpty()) {
+                            i++;
+                            continue;
+                        }
                         if (!urlRaw.startsWith("      "))
                             break;
                         auto urlLine = urlRaw.trimmed();

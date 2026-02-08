@@ -22,12 +22,16 @@ struct ContentEntry {
     QString slug;
     QString name;
     QString description;
+    QString iconPath;
+    QString readmeType;
+    QString readmeContent;
     QList<VersionEntry> versions;
 };
 
 struct TabDefinition {
     QString id;
     QString name;
+    QString iconPath;
     QString sourcePath;
     QString readmeType;
     QString readmeContent;

@@ -185,20 +185,30 @@ void appendTabEntries(QList<LocalPackEntry>& entries, const ResourceAPI::SearchA
     const QString projectId = byProjectId ? term.mid(1).trimmed() : QString();
 
     for (auto const& src : tab.entries) {
+        QFileInfo tabFileInfo(tab.sourcePath);
+        QDir modtabsDir = tabFileInfo.absoluteDir();
+
         auto pack = std::make_shared<ModPlatform::IndexedPack>();
         pack->provider = ModPlatform::ResourceProvider::CUSTOM;
         pack->addonId = QString("customtab:%1:%2").arg(tab.id, src.slug);
         pack->slug = src.slug;
         pack->name = src.name.isEmpty() ? src.slug : src.name;
         pack->description = src.description.isEmpty() ? QObject::tr("Custom content entry") : src.description;
+        if (!src.iconPath.isEmpty()) {
+            pack->logoUrl = modtabsDir.absoluteFilePath(src.iconPath);
+            pack->logoName = QFileInfo(pack->logoUrl).fileName();
+        }
         pack->side = ModPlatform::Side::UniversalSide;
         pack->versionsLoaded = true;
         pack->extraDataLoaded = true;
 
-        if (tab.readmeType.compare("markdown", Qt::CaseInsensitive) == 0)
-            pack->extraData.body = tab.readmeContent;
-        else if (!tab.readmeContent.isEmpty())
-            pack->description += "\n\n" + tab.readmeContent;
+        const bool hasEntryReadme = !src.readmeContent.isEmpty();
+        const QString effectiveReadmeType = hasEntryReadme ? src.readmeType : tab.readmeType;
+        const QString effectiveReadme = hasEntryReadme ? src.readmeContent : tab.readmeContent;
+        if (effectiveReadmeType.compare("markdown", Qt::CaseInsensitive) == 0)
+            pack->extraData.body = effectiveReadme;
+        else if (!effectiveReadme.isEmpty())
+            pack->description += "\n\n" + effectiveReadme;
 
         for (auto const& srcVersion : src.versions) {
             ModPlatform::IndexedVersion version;

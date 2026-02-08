@@ -50,6 +50,29 @@
 #include "ui/widgets/PageContainer.h"
 
 namespace ResourceDownload {
+namespace {
+
+QString providerNameForTask(PageContainer* container, const ResourceDownloadDialog::DownloadTaskPtr& task)
+{
+    auto provider_name = ModPlatform::ProviderCapabilities::name(task->getProvider());
+    if (task->getProvider() != ModPlatform::ResourceProvider::CUSTOM)
+        return provider_name;
+
+    auto addon_id = task->getPack()->addonId.toString();
+    if (!addon_id.startsWith("customtab:"))
+        return provider_name;
+
+    auto parts = addon_id.split(':');
+    if (parts.size() < 3)
+        return provider_name;
+
+    if (auto page = container->getPage(parts[1]); page)
+        return page->displayName();
+
+    return provider_name;
+}
+
+}  // namespace
 
 ResourceDownloadDialog::ResourceDownloadDialog(QWidget* parent, ResourceFolderModel* base_model)
     : QDialog(parent)
@@ -191,7 +214,7 @@ void ResourceDownloadDialog::confirm()
     });
     for (auto& task : selected) {
         auto extraInfo = dependencyExtraInfo.value(task->getPack()->addonId.toString());
-        confirm_dialog->appendResource({ task->getName(), task->getFilename(), ModPlatform::ProviderCapabilities::name(task->getProvider()),
+        confirm_dialog->appendResource({ task->getName(), task->getFilename(), providerNameForTask(m_container, task),
                                          extraInfo.required_by, task->getVersion().version_type.toString(), !extraInfo.maybe_installed });
     }
 
