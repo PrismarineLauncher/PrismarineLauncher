@@ -25,7 +25,7 @@ OutFile "../AmethystLauncher-Setup.exe"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_RUN "$InstDir\prismlauncher.exe"
+!define MUI_FINISHPAGE_RUN "$InstDir\amethystlauncher.exe"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -369,13 +369,13 @@ Section "Amethyst Launcher"
 
   SectionIn RO
 
-  nsExec::Exec /TIMEOUT=2000 'TaskKill /IM prismlauncher.exe /F'
+  nsExec::Exec /TIMEOUT=2000 'TaskKill /IM amethystlauncher.exe /F'
 
   SetOutPath $INSTDIR
 
-  File "prismlauncher.exe"
-  File "prismlauncher_filelink.exe"
-  File "prismlauncher_updater.exe"
+  File "amethystlauncher.exe"
+  File "amethystlauncher_filelink.exe"
+  File "amethystlauncher_updater.exe"
   File "qt.conf"
   File "qtlogging.ini"
   File *.dll
@@ -391,11 +391,11 @@ Section "Amethyst Launcher"
 
   ; Write the URL Handler into registry for curseforge
   WriteRegStr HKCU Software\Classes\curseforge "URL Protocol" ""
-  WriteRegStr HKCU Software\Classes\curseforge\shell\open\command "" '"$INSTDIR\prismlauncher.exe" "%1"'
+  WriteRegStr HKCU Software\Classes\curseforge\shell\open\command "" '"$INSTDIR\amethystlauncher.exe" "%1"'
 
   ; Write the URL Handler into registry for prismlauncher
-  WriteRegStr HKCU Software\Classes\prismlauncher "URL Protocol" ""
-  WriteRegStr HKCU Software\Classes\prismlauncher\shell\open\command "" '"$INSTDIR\prismlauncher.exe" "%1"'
+  WriteRegStr HKCU Software\Classes\amethystlauncher "URL Protocol" ""
+  WriteRegStr HKCU Software\Classes\amethystlauncher\shell\open\command "" '"$INSTDIR\amethystlauncher.exe" "%1"'
 
   ; Write the uninstall keys for Windows
   ; https://learn.microsoft.com/en-us/windows/win32/msi/uninstall-registry-key
@@ -403,7 +403,7 @@ Section "Amethyst Launcher"
   ${GetOptions} $R0 "/NoUninstaller" $R1
   ${If} ${Errors}
     WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "Amethyst Launcher"
-    WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\prismlauncher.exe"
+    WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\amethystlauncher.exe"
     WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe" _?=$INSTDIR'
     WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S _?=$INSTDIR'
     WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
@@ -426,19 +426,19 @@ SectionEnd
 
 Section "Start Menu Shortcut" SM_SHORTCUTS
 
-  CreateShortcut "$SMPROGRAMS\Amethyst Launcher.lnk" "$INSTDIR\prismlauncher.exe" "" "$INSTDIR\prismlauncher.exe" 0
+  CreateShortcut "$SMPROGRAMS\Amethyst Launcher.lnk" "$INSTDIR\amethystlauncher.exe" "" "$INSTDIR\amethystlauncher.exe" 0
 
 SectionEnd
 
 Section /o "Desktop Shortcut" DESKTOP_SHORTCUTS
 
-  CreateShortcut "$DESKTOP\Amethyst Launcher.lnk" "$INSTDIR\prismlauncher.exe" "" "$INSTDIR\prismlauncher.exe" 0
+  CreateShortcut "$DESKTOP\Amethyst Launcher.lnk" "$INSTDIR\amethystlauncher.exe" "" "$INSTDIR\amethystlauncher.exe" 0
 
 SectionEnd
 
 
 !define APPID "AmethystLauncher.App"
-!define APPEXE "prismlauncher.exe"
+!define APPEXE "amethystlauncher.exe"
 !define APPICON "$INSTDIR\${APPEXE},0"
 !define APPDESCRIPTION "Amethyst Launcher"
 !define APPNAME "Amethyst Launcher"
@@ -461,14 +461,14 @@ SectionEnd
 
 Section "Uninstall"
 
-  nsExec::Exec /TIMEOUT=2000 'TaskKill /IM prismlauncher.exe /F'
+  nsExec::Exec /TIMEOUT=2000 'TaskKill /IM amethystlauncher.exe /F'
 
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\AmethystLauncher"
   DeleteRegKey HKCU SOFTWARE\AmethystLauncher
 
-  Delete $INSTDIR\prismlauncher.exe
-  Delete $INSTDIR\prismlauncher_filelink.exe
-  Delete $INSTDIR\prismlauncher_updater.exe
+  Delete $INSTDIR\amethystlauncher.exe
+  Delete $INSTDIR\amethystlauncher_filelink.exe
+  Delete $INSTDIR\amethystlauncher_updater.exe
   Delete $INSTDIR\qt.conf
   Delete $INSTDIR\*.dll
 

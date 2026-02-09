@@ -9,7 +9,7 @@ readme:
 content:
   meteor-client:
     name: Meteor Client
-    icon: amethystplugs/test.png
+    icon: amethystplugs/meteorclient.png
     readme:
       type: markdown
       content: |

@@ -131,7 +131,7 @@ runs:
         New-Item -Name NSISPlugins -ItemType Directory
         Invoke-Webrequest https://github.com/negrutiu/nsis-nscurl/releases/download/"${{ env.NSCURL_VERSION }}"/NScurl.zip -OutFile NSISPlugins\NScurl.zip
         $nscurl_hash = Get-FileHash NSISPlugins\NScurl.zip -Algorithm Sha256 | Select-Object -ExpandProperty Hash
-        if ( $nscurl_hash -ne "${{ env.nscurl_sha256 }}") {
+        if ( $nscurl_hash -ne "${{ env.NSCURL_SHA256 }}") {
           echo "::error:: NSCurl.zip sha256 mismatch"
           exit 1
         }

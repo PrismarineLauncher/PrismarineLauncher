@@ -42,7 +42,7 @@ Config::Config()
 {
     // Name and copyright
     LAUNCHER_NAME = "AmethystLauncher";
-    LAUNCHER_APP_BINARY_NAME = "prismlauncher";
+    LAUNCHER_APP_BINARY_NAME = "amethystlauncher";
     LAUNCHER_DISPLAYNAME = "Amethyst Launcher";
     LAUNCHER_COPYRIGHT = "© 2022-2026 Amethyst Launcher Contributors\n© 2021-2022 PolyMC Contributors\n© 2012-2021 MultiMC Contributors";
     LAUNCHER_DOMAIN = "prismlauncher.org";
@@ -60,7 +60,7 @@ Config::Config()
 
     BUILD_PLATFORM = "unknown";
     BUILD_ARTIFACT = "";
-    BUILD_DATE = "2026-02-06";
+    BUILD_DATE = "2026-02-08";
     UPDATER_GITHUB_REPO = "https://github.com/AmethystLauncher/AmethystLauncher";
 
     COMPILER_NAME = "GNU";
@@ -82,7 +82,7 @@ Config::Config()
 #define Launcher_ENABLE_JAVA_DOWNLOADER 0
     JAVA_DOWNLOADER_ENABLED = Launcher_ENABLE_JAVA_DOWNLOADER;
 
-    GIT_COMMIT = "9171e2b2e171acc34a8bff876c2ed697987c50f7";
+    GIT_COMMIT = "f75edb7b59decbe093a46b24462be9c1d0988587";
     GIT_TAG = "-128-NOTFOUND";
     GIT_REFSPEC = "refs/heads/develop";
 
@@ -120,7 +120,7 @@ Config::Config()
     TRANSLATIONS_URL = "https://hosted.weblate.org/projects/prismlauncher/launcher/";
     TRANSLATION_FILES_URL = "https://i18n.prismlauncher.org/";
     MATRIX_URL = "https://prismlauncher.org/matrix";
-    DISCORD_URL = "https://prismlauncher.org/discord";
+    DISCORD_URL = "https://discord.gg/ep3MC4Y9Fr";
     SUBREDDIT_URL = "https://prismlauncher.org/reddit";
 }
 
