@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::ffi::{CStr, c_char};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -1215,27 +1215,52 @@ pub fn curseforge_resolve_primary_file(
 }
 
 pub fn download_file_to_path(url: &str, path: &Path) -> Result<(), String> {
+    download_file_to_path_with_progress(url, path, |_, _| {})
+}
+
+pub fn download_file_to_path_with_progress<F>(
+    url: &str,
+    path: &Path,
+    mut on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(u64, Option<u64>),
+{
     let client = Client::builder()
         .user_agent("PrismarineLauncher-Rust")
         .build()
         .map_err(|e| format!("failed to build http client: {e}"))?;
 
-    let response = client
+    let mut response = client
         .get(url)
         .send()
         .map_err(|e| format!("download request failed: {e}"))?;
     if !response.status().is_success() {
         return Err(format!("download returned {}", response.status()));
     }
-    let bytes = response
-        .bytes()
-        .map_err(|e| format!("failed to read download body: {e}"))?;
+    let total = response.content_length();
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create parent directory: {e}"))?;
     }
-    fs::write(path, &bytes).map_err(|e| format!("failed to write file: {e}"))?;
+    let mut file = fs::File::create(path).map_err(|e| format!("failed to create file: {e}"))?;
+    let mut downloaded = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut buf)
+            .map_err(|e| format!("failed to read download body: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buf[..read])
+            .map_err(|e| format!("failed to write file: {e}"))?;
+        downloaded += read as u64;
+        on_progress(downloaded, total);
+    }
+    file.flush()
+        .map_err(|e| format!("failed to flush file: {e}"))?;
     Ok(())
 }
 

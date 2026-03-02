@@ -6,11 +6,11 @@ use rust_core::{
     complete_microsoft_device_login, copy_instance, create_instance,
     curseforge_get_project_details, curseforge_resolve_primary_file,
     curseforge_search_projects_paged, default_launch_profile, delete_instance,
-    download_file_to_path, format_s3_time, list_logs, list_mod_files, load_launch_profile,
-    load_prism_instance_config, modrinth_get_project_details, modrinth_resolve_primary_file,
-    modrinth_search_projects_by_type_paged, parse_s3_time, read_log_preview, rename_instance,
-    save_launch_profile, scan_instances, start_microsoft_device_code, sync_modrinth_managed_mods,
-    validate_minecraft_account,
+    download_file_to_path, download_file_to_path_with_progress, format_s3_time, list_logs,
+    list_mod_files, load_launch_profile, load_prism_instance_config, modrinth_get_project_details,
+    modrinth_resolve_primary_file, modrinth_search_projects_by_type_paged, parse_s3_time,
+    read_log_preview, rename_instance, save_launch_profile, scan_instances,
+    start_microsoft_device_code, sync_modrinth_managed_mods, validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +330,67 @@ struct DownloadDetails {
     icon_url: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+enum DownloadTaskKind {
+    Modrinth {
+        project_id: String,
+        game_version: String,
+        loader: String,
+    },
+    CurseForge {
+        mod_id: i64,
+        game_version: String,
+    },
+    DirectUrl {
+        url: String,
+        file_name: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DownloadJobState {
+    Queued,
+    Resolving,
+    Downloading,
+    Done,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+struct DownloadJob {
+    id: u64,
+    title: String,
+    content_type: DownloadContentType,
+    instance_path: PathBuf,
+    kind: DownloadTaskKind,
+    state: DownloadJobState,
+    status: String,
+    downloaded: u64,
+    total: Option<u64>,
+    progress: f32,
+}
+
+#[derive(Clone, Debug)]
+enum DownloadQueueEvent {
+    Resolving {
+        job_id: u64,
+        message: String,
+    },
+    Progress {
+        job_id: u64,
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    Finished {
+        job_id: u64,
+        target_path: PathBuf,
+    },
+    Error {
+        job_id: u64,
+        message: String,
+    },
+}
+
 struct PrismarineApp {
     instances: Vec<Instance>,
     accounts: Vec<Account>,
@@ -393,6 +454,11 @@ struct PrismarineApp {
     download_details_receiver: Option<Receiver<DownloadDetailsEvent>>,
     download_details_request_id: u64,
     download_details_cache: HashMap<String, (DownloadDetails, Instant)>,
+    download_jobs: Vec<DownloadJob>,
+    next_download_job_id: u64,
+    download_queue_tx: Sender<DownloadQueueEvent>,
+    download_queue_rx: Receiver<DownloadQueueEvent>,
+    max_parallel_downloads: usize,
 }
 
 impl Default for PrismarineApp {
@@ -419,6 +485,7 @@ impl Default for PrismarineApp {
                 },
             ];
         }
+        let (download_queue_tx, download_queue_rx) = mpsc::channel::<DownloadQueueEvent>();
         let mut app = Self {
             instances: Vec::new(),
             accounts,
@@ -482,6 +549,11 @@ impl Default for PrismarineApp {
             download_details_receiver: None,
             download_details_request_id: 0,
             download_details_cache: HashMap::new(),
+            download_jobs: Vec::new(),
+            next_download_job_id: 1,
+            download_queue_tx,
+            download_queue_rx,
+            max_parallel_downloads: 2,
         };
         app.reload_instances();
         app
@@ -1070,7 +1142,97 @@ impl PrismarineApp {
             .retain(|_, (_, ts)| ts.elapsed() <= Duration::from_secs(300));
     }
 
-    fn do_curseforge_download_url(&mut self) {
+    fn queue_download_job(
+        &mut self,
+        title: String,
+        content_type: DownloadContentType,
+        instance_path: PathBuf,
+        kind: DownloadTaskKind,
+    ) {
+        let job = DownloadJob {
+            id: self.next_download_job_id,
+            title: title.clone(),
+            content_type,
+            instance_path,
+            kind,
+            state: DownloadJobState::Queued,
+            status: "Queued".to_string(),
+            downloaded: 0,
+            total: None,
+            progress: 0.0,
+        };
+        self.next_download_job_id = self.next_download_job_id.wrapping_add(1);
+        self.download_jobs.push(job);
+        self.status = format!("Queued download: {title}");
+    }
+
+    fn queue_modrinth_selected_download(&mut self) {
+        let Some(hit_idx) = self.selected_modrinth_hit else {
+            self.status = "No Modrinth project selected".to_string();
+            return;
+        };
+        let Some(hit) = self.modrinth_hits.get(hit_idx).cloned() else {
+            self.status = "Invalid Modrinth selection".to_string();
+            return;
+        };
+        let Some(instance_path) = self.selected_instance_path() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        let kind = DownloadTaskKind::Modrinth {
+            project_id: hit.project_id.clone(),
+            game_version: self.modrinth_game_version.trim().to_string(),
+            loader: match self.download_content_type {
+                DownloadContentType::Mods => self.modrinth_loader.trim().to_string(),
+                DownloadContentType::ResourcePacks => String::new(),
+            },
+        };
+        self.queue_download_job(
+            format!("{} ({})", hit.title, hit.author),
+            self.download_content_type.clone(),
+            instance_path,
+            kind,
+        );
+    }
+
+    fn queue_modrinth_download_by_index(&mut self, idx: usize) {
+        self.selected_modrinth_hit = Some(idx);
+        self.request_selected_download_details();
+        self.queue_modrinth_selected_download();
+    }
+
+    fn queue_curseforge_selected_download(&mut self) {
+        let Some(hit_idx) = self.selected_curseforge_hit else {
+            self.status = "No CurseForge project selected".to_string();
+            return;
+        };
+        let Some(hit) = self.curseforge_hits.get(hit_idx).cloned() else {
+            self.status = "Invalid CurseForge selection".to_string();
+            return;
+        };
+        let Some(instance_path) = self.selected_instance_path() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        let kind = DownloadTaskKind::CurseForge {
+            mod_id: hit.mod_id,
+            game_version: self.modrinth_game_version.trim().to_string(),
+        };
+        self.queue_download_job(
+            format!("{} ({})", hit.title, hit.author),
+            self.download_content_type.clone(),
+            instance_path,
+            kind,
+        );
+    }
+
+    fn queue_curseforge_download_by_index(&mut self, idx: usize) {
+        self.selected_curseforge_hit = Some(idx);
+        self.request_selected_download_details();
+        self.queue_curseforge_selected_download();
+    }
+
+    fn queue_direct_url_download(&mut self) {
         let url = self.curseforge_download_url.trim().to_string();
         if url.is_empty() {
             self.status = "CurseForge URL is empty".to_string();
@@ -1094,96 +1256,241 @@ impl PrismarineApp {
         } else {
             self.curseforge_filename.trim().to_string()
         };
-        let target =
-            preferred_download_dir(&instance_path, &self.download_content_type).join(&file_name);
-        match download_file_to_path(&url, &target) {
-            Ok(_) => {
-                self.status = format!("Downloaded {} -> {}", file_name, target.display());
-                self.refresh_selected_content();
+
+        self.queue_download_job(
+            format!("Direct URL: {file_name}"),
+            self.download_content_type.clone(),
+            instance_path,
+            DownloadTaskKind::DirectUrl { url, file_name },
+        );
+    }
+
+    fn spawn_download_job_worker(&self, job_id: u64, job: DownloadJob) {
+        let tx = self.download_queue_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(DownloadQueueEvent::Resolving {
+                job_id,
+                message: "Resolving file...".to_string(),
+            });
+            let resolved = match job.kind {
+                DownloadTaskKind::Modrinth {
+                    project_id,
+                    game_version,
+                    loader,
+                } => modrinth_resolve_primary_file(&project_id, &game_version, &loader),
+                DownloadTaskKind::CurseForge {
+                    mod_id,
+                    game_version,
+                } => curseforge_resolve_primary_file(FLAME_API_KEY, mod_id, &game_version),
+                DownloadTaskKind::DirectUrl { url, file_name } => {
+                    Ok(rust_core::ModrinthDownloadFile {
+                        url,
+                        filename: file_name,
+                    })
+                }
+            };
+
+            let file = match resolved {
+                Ok(file) => file,
+                Err(err) => {
+                    let _ = tx.send(DownloadQueueEvent::Error {
+                        job_id,
+                        message: format!("Resolve failed: {err}"),
+                    });
+                    return;
+                }
+            };
+            let target =
+                preferred_download_dir(&job.instance_path, &job.content_type).join(&file.filename);
+            let mut last_emit = Instant::now() - Duration::from_secs(1);
+            let res =
+                download_file_to_path_with_progress(&file.url, &target, |downloaded, total| {
+                    if last_emit.elapsed() >= Duration::from_millis(80) || total == Some(downloaded)
+                    {
+                        let _ = tx.send(DownloadQueueEvent::Progress {
+                            job_id,
+                            downloaded,
+                            total,
+                        });
+                        last_emit = Instant::now();
+                    }
+                });
+            match res {
+                Ok(_) => {
+                    let _ = tx.send(DownloadQueueEvent::Finished {
+                        job_id,
+                        target_path: target,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(DownloadQueueEvent::Error {
+                        job_id,
+                        message: format!("Download failed: {err}"),
+                    });
+                }
             }
-            Err(err) => {
-                self.status = format!("Failed to download CurseForge file: {err}");
+        });
+    }
+
+    fn process_download_queue(&mut self) {
+        let active = self
+            .download_jobs
+            .iter()
+            .filter(|j| {
+                j.state == DownloadJobState::Resolving || j.state == DownloadJobState::Downloading
+            })
+            .count();
+        let mut available_slots = self.max_parallel_downloads.saturating_sub(active);
+        if available_slots == 0 {
+            return;
+        }
+
+        let mut to_start = Vec::new();
+        for (idx, job) in self.download_jobs.iter_mut().enumerate() {
+            if available_slots == 0 {
+                break;
+            }
+            if job.state == DownloadJobState::Queued {
+                job.state = DownloadJobState::Resolving;
+                job.status = "Waiting for file metadata...".to_string();
+                to_start.push(idx);
+                available_slots -= 1;
             }
         }
+        for idx in to_start {
+            let job = self.download_jobs[idx].clone();
+            self.spawn_download_job_worker(job.id, job);
+        }
+    }
+
+    fn poll_download_queue_events(&mut self) {
+        let mut has_completed = false;
+        loop {
+            let Ok(event) = self.download_queue_rx.try_recv() else {
+                break;
+            };
+            match event {
+                DownloadQueueEvent::Resolving { job_id, message } => {
+                    if let Some(job) = self.download_jobs.iter_mut().find(|j| j.id == job_id) {
+                        job.state = DownloadJobState::Resolving;
+                        job.status = message;
+                    }
+                }
+                DownloadQueueEvent::Progress {
+                    job_id,
+                    downloaded,
+                    total,
+                } => {
+                    if let Some(job) = self.download_jobs.iter_mut().find(|j| j.id == job_id) {
+                        job.state = DownloadJobState::Downloading;
+                        job.downloaded = downloaded;
+                        job.total = total;
+                        job.progress = total
+                            .map(|t| {
+                                if t == 0 {
+                                    0.0
+                                } else {
+                                    (downloaded as f32 / t as f32).clamp(0.0, 1.0)
+                                }
+                            })
+                            .unwrap_or(0.0);
+                        job.status = match total {
+                            Some(t) => {
+                                format!(
+                                    "Downloading... {} / {}",
+                                    human_bytes(downloaded),
+                                    human_bytes(t)
+                                )
+                            }
+                            None => format!("Downloading... {}", human_bytes(downloaded)),
+                        };
+                    }
+                }
+                DownloadQueueEvent::Finished {
+                    job_id,
+                    target_path,
+                } => {
+                    if let Some(job) = self.download_jobs.iter_mut().find(|j| j.id == job_id) {
+                        job.state = DownloadJobState::Done;
+                        job.progress = 1.0;
+                        job.status = format!("Done: {}", target_path.display());
+                    }
+                    has_completed = true;
+                }
+                DownloadQueueEvent::Error { job_id, message } => {
+                    if let Some(job) = self.download_jobs.iter_mut().find(|j| j.id == job_id) {
+                        job.state = DownloadJobState::Failed;
+                        job.status = message.clone();
+                    }
+                    self.status = message;
+                }
+            }
+        }
+        if has_completed {
+            self.refresh_selected_content();
+        }
+    }
+
+    fn draw_download_queue(&mut self, ui: &mut egui::Ui) {
+        if self.download_jobs.is_empty() {
+            return;
+        }
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Download Queue");
+                let active = self
+                    .download_jobs
+                    .iter()
+                    .filter(|j| {
+                        j.state == DownloadJobState::Resolving
+                            || j.state == DownloadJobState::Downloading
+                    })
+                    .count();
+                ui.monospace(format!("active: {active}"));
+                if ui.button("Clear Finished").clicked() {
+                    self.download_jobs.retain(|j| {
+                        j.state != DownloadJobState::Done && j.state != DownloadJobState::Failed
+                    });
+                }
+            });
+            let start = self.download_jobs.len().saturating_sub(6);
+            for job in self.download_jobs.iter().skip(start) {
+                ui.horizontal(|ui| {
+                    ui.label(job.title.as_str());
+                    ui.add_space(8.0);
+                    ui.small(job.status.as_str());
+                });
+                if job.state == DownloadJobState::Downloading
+                    || job.state == DownloadJobState::Resolving
+                {
+                    let bar = if job.total.is_some() {
+                        job.progress
+                    } else {
+                        0.0
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(bar)
+                            .show_percentage()
+                            .desired_width(ui.available_width()),
+                    );
+                } else if job.state == DownloadJobState::Done {
+                    ui.add(egui::ProgressBar::new(1.0).desired_width(ui.available_width()));
+                }
+            }
+        });
+        ui.add_space(6.0);
+    }
+
+    fn do_curseforge_download_url(&mut self) {
+        self.queue_direct_url_download();
     }
 
     fn do_curseforge_download_selected(&mut self) {
-        let Some(i) = self.selected_curseforge_hit else {
-            self.status = "No CurseForge project selected".to_string();
-            return;
-        };
-        let Some(hit) = self.curseforge_hits.get(i).cloned() else {
-            self.status = "Invalid CurseForge selection".to_string();
-            return;
-        };
-        let Some(instance_path) = self.selected_instance_path() else {
-            self.status = "No instance selected".to_string();
-            return;
-        };
-        match curseforge_resolve_primary_file(
-            FLAME_API_KEY,
-            hit.mod_id,
-            &self.modrinth_game_version,
-        ) {
-            Ok(file) => {
-                let target = preferred_download_dir(&instance_path, &self.download_content_type)
-                    .join(&file.filename);
-                match download_file_to_path(&file.url, &target) {
-                    Ok(_) => {
-                        self.status =
-                            format!("Downloaded {} -> {}", file.filename, target.display());
-                        self.refresh_selected_content();
-                    }
-                    Err(err) => {
-                        self.status = format!("Failed to download CurseForge file: {err}");
-                    }
-                }
-            }
-            Err(err) => {
-                self.status = format!("Failed to resolve CurseForge file: {err}");
-            }
-        }
+        self.queue_curseforge_selected_download();
     }
 
     fn do_modrinth_download_selected(&mut self) {
-        let Some(hit_idx) = self.selected_modrinth_hit else {
-            self.status = "No Modrinth project selected".to_string();
-            return;
-        };
-        if hit_idx >= self.modrinth_hits.len() {
-            self.status = "Invalid Modrinth selection".to_string();
-            return;
-        }
-        let Some(instance_path) = self.selected_instance_path() else {
-            self.status = "No instance selected".to_string();
-            return;
-        };
-        let hit = self.modrinth_hits[hit_idx].clone();
-        let version = self.modrinth_game_version.trim();
-        let loader = match self.download_content_type {
-            DownloadContentType::Mods => self.modrinth_loader.trim(),
-            DownloadContentType::ResourcePacks => "",
-        };
-
-        match modrinth_resolve_primary_file(&hit.project_id, version, loader) {
-            Ok(file) => {
-                let target = preferred_download_dir(&instance_path, &self.download_content_type)
-                    .join(&file.filename);
-                match download_file_to_path(&file.url, &target) {
-                    Ok(_) => {
-                        self.status =
-                            format!("Downloaded {} -> {}", file.filename, target.display());
-                        self.refresh_selected_content();
-                    }
-                    Err(err) => {
-                        self.status = format!("Failed to download file: {err}");
-                    }
-                }
-            }
-            Err(err) => {
-                self.status = format!("Failed to resolve Modrinth file: {err}");
-            }
-        }
+        self.queue_modrinth_selected_download();
     }
 
     fn do_auto_update_mods(&mut self) {
@@ -2301,6 +2608,7 @@ impl PrismarineApp {
     }
 
     fn draw_mods_tab(&mut self, ui: &mut egui::Ui) {
+        self.draw_download_queue(ui);
         ui.horizontal(|ui| {
             if ui.button("Add Jar").clicked() {
                 self.do_add_jar_to_mods();
@@ -2472,6 +2780,7 @@ impl PrismarineApp {
                     ui.columns(2, |cols| {
                         let mut row_end = 0usize;
                         let mut pending_select = None;
+                        let mut pending_queue = None;
                         cols[0].label("Результаты");
                         cols[0].separator();
                         egui::ScrollArea::vertical()
@@ -2509,8 +2818,12 @@ impl PrismarineApp {
                                             } else {
                                                 ui.add_space(row_h);
                                             }
-                                            if ui.selectable_label(selected, label).clicked() {
+                                            let response = ui.selectable_label(selected, label);
+                                            if response.clicked() {
                                                 pending_select = Some(idx);
+                                            }
+                                            if response.double_clicked() {
+                                                pending_queue = Some(idx);
                                             }
                                         });
                                     }
@@ -2519,6 +2832,9 @@ impl PrismarineApp {
                         if let Some(idx) = pending_select {
                             self.selected_modrinth_hit = Some(idx);
                             self.request_selected_download_details();
+                        }
+                        if let Some(idx) = pending_queue {
+                            self.queue_modrinth_download_by_index(idx);
                         }
                         if row_end + 2 >= self.modrinth_hits.len()
                             && self.download_search_has_more
@@ -2588,6 +2904,7 @@ impl PrismarineApp {
                     ui.columns(2, |cols| {
                         let mut row_end = 0usize;
                         let mut pending_select = None;
+                        let mut pending_queue = None;
                         cols[0].label("Результаты");
                         cols[0].separator();
                         egui::ScrollArea::vertical()
@@ -2623,8 +2940,12 @@ impl PrismarineApp {
                                             } else {
                                                 ui.add_space(row_h);
                                             }
-                                            if ui.selectable_label(selected, label).clicked() {
+                                            let response = ui.selectable_label(selected, label);
+                                            if response.clicked() {
                                                 pending_select = Some(idx);
+                                            }
+                                            if response.double_clicked() {
+                                                pending_queue = Some(idx);
                                             }
                                         });
                                     }
@@ -2633,6 +2954,9 @@ impl PrismarineApp {
                         if let Some(idx) = pending_select {
                             self.selected_curseforge_hit = Some(idx);
                             self.request_selected_download_details();
+                        }
+                        if let Some(idx) = pending_queue {
+                            self.queue_curseforge_download_by_index(idx);
                         }
                         if row_end + 2 >= self.curseforge_hits.len()
                             && self.download_search_has_more
@@ -3072,6 +3396,8 @@ impl App for PrismarineApp {
         self.poll_device_login_events();
         self.poll_download_search_events();
         self.poll_download_details_events();
+        self.poll_download_queue_events();
+        self.process_download_queue();
 
         if let Some(deadline) = self.download_search_debounce_deadline
             && Instant::now() >= deadline
@@ -3089,6 +3415,11 @@ impl App for PrismarineApp {
         if self.download_search_loading
             || self.download_details_receiver.is_some()
             || self.download_search_debounce_deadline.is_some()
+            || self.download_jobs.iter().any(|j| {
+                j.state == DownloadJobState::Queued
+                    || j.state == DownloadJobState::Resolving
+                    || j.state == DownloadJobState::Downloading
+            })
         {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
@@ -3221,6 +3552,21 @@ fn percent_encode_query(input: &str) -> String {
         }
     }
     out
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn preferred_mods_dir(instance_path: &Path) -> PathBuf {
