@@ -2275,10 +2275,7 @@ impl PrismarineApp {
     fn do_create_instance(&mut self) {
         let name = self.create_name.trim().to_string();
         let game_version = self.create_game_version.trim().to_string();
-        let Some(loader) = self.create_loader.clone() else {
-            self.status = "Choose loader: Fabric / Forge / Quilt / Neo-Forge".to_string();
-            return;
-        };
+        let loader = self.create_loader.clone();
         if name.is_empty() {
             self.status = "Instance name must not be empty".to_string();
             return;
@@ -2289,10 +2286,13 @@ impl PrismarineApp {
         }
         match create_instance(&self.instance_root(), &name) {
             Ok(created) => {
+                let managed_loader = loader
+                    .as_ref()
+                    .map(CreateLoader::cfg_value)
+                    .unwrap_or("vanilla");
                 let cfg_text = format!(
                     "# PrismarineLauncher instance\nIntendedVersion={}\nManagedLoader={}\n",
-                    game_version,
-                    loader.cfg_value()
+                    game_version, managed_loader
                 );
                 if let Err(err) = fs::write(created.path.join("instance.cfg"), cfg_text) {
                     self.status =
@@ -2300,12 +2300,19 @@ impl PrismarineApp {
                     return;
                 }
 
+                let mut components = vec![serde_json::json!({
+                    "uid": "net.minecraft",
+                    "version": game_version
+                })];
+                if let Some(loader) = &loader {
+                    components.push(serde_json::json!({
+                        "uid": loader.mmc_uid(),
+                        "version": "0.0.0"
+                    }));
+                }
                 let mmc_pack = serde_json::json!({
                     "formatVersion": 1,
-                    "components": [
-                        { "uid": "net.minecraft", "version": game_version },
-                        { "uid": loader.mmc_uid(), "version": "0.0.0" }
-                    ]
+                    "components": components
                 });
                 if let Err(err) = fs::write(
                     created.path.join("mmc-pack.json"),
@@ -2329,7 +2336,10 @@ impl PrismarineApp {
                 self.status = format!(
                     "Created instance {name} [{} | {}]",
                     game_version,
-                    loader.label()
+                    loader
+                        .as_ref()
+                        .map(CreateLoader::label)
+                        .unwrap_or("Vanilla")
                 );
                 self.show_create_dialog = false;
                 self.create_name.clear();
@@ -3964,15 +3974,20 @@ impl PrismarineApp {
                                             }
                                         });
                                 }
-                                cols[1].label("Загрузчик модов (обязательно):");
+                                cols[1].label("Загрузчик модов (опционально):");
                                 egui::ComboBox::from_id_salt("create_loader")
                                     .selected_text(
                                         self.create_loader
                                             .as_ref()
                                             .map(CreateLoader::label)
-                                            .unwrap_or("Select loader"),
+                                            .unwrap_or("Vanilla (no loader)"),
                                     )
                                     .show_ui(&mut cols[1], |ui| {
+                                        ui.selectable_value(
+                                            &mut self.create_loader,
+                                            None,
+                                            "Vanilla (no loader)",
+                                        );
                                         ui.selectable_value(
                                             &mut self.create_loader,
                                             Some(CreateLoader::Fabric),
