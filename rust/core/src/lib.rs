@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, c_char};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
 #[repr(C)]
@@ -57,6 +59,23 @@ pub struct PrismInstanceConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountValidation {
     pub username: String,
+    pub has_minecraft_license: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MicrosoftDeviceCode {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LicensedMicrosoftAccount {
+    pub username: String,
+    pub access_token: String,
     pub has_minecraft_license: bool,
 }
 
@@ -449,6 +468,246 @@ pub fn validate_minecraft_account(access_token: &str) -> Result<AccountValidatio
     Ok(AccountValidation {
         username: profile.name,
         has_minecraft_license: !entitlements.items.is_empty(),
+    })
+}
+
+#[derive(Deserialize)]
+struct DeviceCodeResponse {
+    device_code: Option<String>,
+    user_code: Option<String>,
+    verification_uri: Option<String>,
+    verification_uri_complete: Option<String>,
+    expires_in: Option<u64>,
+    interval: Option<u64>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct XboxDisplayClaims {
+    xui: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct XboxTokenResponse {
+    #[serde(rename = "Token")]
+    token: String,
+    #[serde(rename = "DisplayClaims")]
+    display_claims: XboxDisplayClaims,
+}
+
+#[derive(Deserialize)]
+struct MinecraftLoginResponse {
+    access_token: String,
+}
+
+pub fn start_microsoft_device_code(client_id: &str) -> Result<MicrosoftDeviceCode, String> {
+    let id = client_id.trim();
+    if id.is_empty() {
+        return Err("MSA client id is empty".to_string());
+    }
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let response = client
+        .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode")
+        .form(&[
+            ("client_id", id),
+            ("scope", "XboxLive.SignIn XboxLive.offline_access"),
+        ])
+        .send()
+        .map_err(|e| format!("device code request failed: {e}"))?;
+    let status = response.status();
+    let parsed = response
+        .json::<DeviceCodeResponse>()
+        .map_err(|e| format!("failed to parse device code response: {e}"))?;
+    if !status.is_success() {
+        let err = parsed.error.unwrap_or_else(|| format!("http {status}"));
+        let msg = parsed.error_description.unwrap_or_default();
+        return Err(if msg.is_empty() {
+            format!("device code request failed: {err}")
+        } else {
+            format!("device code request failed: {err}: {msg}")
+        });
+    }
+
+    let device_code = parsed
+        .device_code
+        .ok_or_else(|| "device code response missing device_code".to_string())?;
+    let user_code = parsed
+        .user_code
+        .ok_or_else(|| "device code response missing user_code".to_string())?;
+    let verification_uri = parsed
+        .verification_uri
+        .ok_or_else(|| "device code response missing verification_uri".to_string())?;
+
+    Ok(MicrosoftDeviceCode {
+        device_code,
+        user_code,
+        verification_uri,
+        verification_uri_complete: parsed.verification_uri_complete,
+        expires_in: parsed.expires_in.unwrap_or(900),
+        interval: parsed.interval.unwrap_or(5),
+    })
+}
+
+fn extract_uhs(claims: &XboxDisplayClaims) -> Option<String> {
+    for item in &claims.xui {
+        let obj = item.as_object()?;
+        if let Some(uhs) = obj.get("uhs").and_then(|x| x.as_str()) {
+            return Some(uhs.to_string());
+        }
+    }
+    None
+}
+
+pub fn complete_microsoft_device_login(
+    client_id: &str,
+    device: &MicrosoftDeviceCode,
+) -> Result<LicensedMicrosoftAccount, String> {
+    let id = client_id.trim();
+    if id.is_empty() {
+        return Err("MSA client id is empty".to_string());
+    }
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let mut interval = device.interval.max(1);
+    let max_polls = (device.expires_in / interval.max(1)).saturating_add(2);
+    let mut msa_access_token = String::new();
+
+    for _ in 0..max_polls {
+        thread::sleep(Duration::from_secs(interval));
+        let response = client
+            .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
+            .form(&[
+                ("client_id", id),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", device.device_code.as_str()),
+            ])
+            .send()
+            .map_err(|e| format!("device token request failed: {e}"))?;
+        let status = response.status();
+        let parsed = response
+            .json::<DeviceTokenResponse>()
+            .map_err(|e| format!("failed to parse device token response: {e}"))?;
+
+        if status.is_success() {
+            if let Some(token) = parsed.access_token {
+                msa_access_token = token;
+                break;
+            }
+            return Err("device token response missing access_token".to_string());
+        }
+
+        let code = parsed.error.unwrap_or_else(|| "authorization_pending".to_string());
+        match code.as_str() {
+            "authorization_pending" => {}
+            "slow_down" => {
+                interval = interval.saturating_add(5);
+            }
+            "expired_token" => return Err("device login expired before approval".to_string()),
+            _ => {
+                let msg = parsed.error_description.unwrap_or_default();
+                return Err(if msg.is_empty() {
+                    format!("device token error: {code}")
+                } else {
+                    format!("device token error: {code}: {msg}")
+                });
+            }
+        }
+    }
+    if msa_access_token.is_empty() {
+        return Err("device login timed out".to_string());
+    }
+
+    let xbox_user = client
+        .post("https://user.auth.xboxlive.com/user/authenticate")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("x-xbl-contract-version", "1")
+        .json(&serde_json::json!({
+            "Properties": {
+                "AuthMethod": "RPS",
+                "SiteName": "user.auth.xboxlive.com",
+                "RpsTicket": format!("d={msa_access_token}"),
+            },
+            "RelyingParty": "http://auth.xboxlive.com",
+            "TokenType": "JWT",
+        }))
+        .send()
+        .map_err(|e| format!("xbox user auth request failed: {e}"))?;
+    if !xbox_user.status().is_success() {
+        return Err(format!("xbox user auth returned {}", xbox_user.status()));
+    }
+    let xbox_user = xbox_user
+        .json::<XboxTokenResponse>()
+        .map_err(|e| format!("failed to parse xbox user auth: {e}"))?;
+    let uhs = extract_uhs(&xbox_user.display_claims)
+        .ok_or_else(|| "xbox user auth missing user hash".to_string())?;
+
+    let xsts = client
+        .post("https://xsts.auth.xboxlive.com/xsts/authorize")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("x-xbl-contract-version", "1")
+        .json(&serde_json::json!({
+            "Properties": {
+                "SandboxId": "RETAIL",
+                "UserTokens": [xbox_user.token],
+            },
+            "RelyingParty": "rp://api.minecraftservices.com/",
+            "TokenType": "JWT",
+        }))
+        .send()
+        .map_err(|e| format!("xsts authorize request failed: {e}"))?;
+    if !xsts.status().is_success() {
+        return Err(format!("xsts authorize returned {}", xsts.status()));
+    }
+    let xsts = xsts
+        .json::<XboxTokenResponse>()
+        .map_err(|e| format!("failed to parse xsts authorize: {e}"))?;
+    let xsts_uhs =
+        extract_uhs(&xsts.display_claims).ok_or_else(|| "xsts token missing user hash".to_string())?;
+    if xsts_uhs != uhs {
+        return Err("xsts user hash does not match xbox user hash".to_string());
+    }
+
+    let mc_login = client
+        .post("https://api.minecraftservices.com/launcher/login")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "xtoken": format!("XBL3.0 x={uhs};{}", xsts.token),
+            "platform": "PC_LAUNCHER",
+        }))
+        .send()
+        .map_err(|e| format!("minecraft launcher login request failed: {e}"))?;
+    if !mc_login.status().is_success() {
+        return Err(format!("minecraft launcher login returned {}", mc_login.status()));
+    }
+    let mc_login = mc_login
+        .json::<MinecraftLoginResponse>()
+        .map_err(|e| format!("failed to parse minecraft launcher login: {e}"))?;
+
+    let validation = validate_minecraft_account(&mc_login.access_token)?;
+    Ok(LicensedMicrosoftAccount {
+        username: validation.username,
+        access_token: mc_login.access_token,
+        has_minecraft_license: validation.has_minecraft_license,
     })
 }
 

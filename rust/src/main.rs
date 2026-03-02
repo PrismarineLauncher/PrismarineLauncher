@@ -1,11 +1,12 @@
 use anyhow::Result;
 use eframe::{App, Frame, NativeOptions, egui};
 use rust_core::{
-    LaunchProfile, ModrinthSearchHit, build_java_command, copy_instance, create_instance,
+    LaunchProfile, LicensedMicrosoftAccount, MicrosoftDeviceCode, ModrinthSearchHit,
+    build_java_command, complete_microsoft_device_login, copy_instance, create_instance,
     default_launch_profile, delete_instance, download_file_to_path, format_s3_time, list_logs,
     list_mod_files, load_launch_profile, load_prism_instance_config, modrinth_resolve_primary_file,
     modrinth_search_projects, parse_s3_time, read_log_preview, rename_instance, scan_instances,
-    validate_minecraft_account,
+    start_microsoft_device_code, validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum CenterTab {
@@ -199,6 +201,13 @@ fn instances_root_path() -> PathBuf {
     local_data_root().join("instances")
 }
 
+const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
+
+enum DeviceLoginEvent {
+    Success(LicensedMicrosoftAccount),
+    Error(String),
+}
+
 struct PrismarineApp {
     instances: Vec<Instance>,
     accounts: Vec<Account>,
@@ -225,6 +234,10 @@ struct PrismarineApp {
     show_add_account_dialog: bool,
     new_account_name: String,
     new_account_token: String,
+    device_login_info: Option<MicrosoftDeviceCode>,
+    device_login_receiver: Option<Receiver<DeviceLoginEvent>>,
+    device_login_status: String,
+    device_login_qr_payload: String,
     show_download_panel: bool,
     download_provider: DownloadProvider,
     modrinth_query: String,
@@ -291,6 +304,10 @@ impl Default for PrismarineApp {
             show_add_account_dialog: false,
             new_account_name: String::new(),
             new_account_token: String::new(),
+            device_login_info: None,
+            device_login_receiver: None,
+            device_login_status: String::new(),
+            device_login_qr_payload: String::new(),
             show_download_panel: false,
             download_provider: DownloadProvider::Modrinth,
             modrinth_query: String::new(),
@@ -406,6 +423,86 @@ impl PrismarineApp {
             }
             Err(err) => {
                 self.status = format!("Account validation failed: {err}");
+            }
+        }
+    }
+
+    fn apply_licensed_account(&mut self, account: LicensedMicrosoftAccount) {
+        self.accounts.push(Account {
+            name: account.username.clone(),
+            active: false,
+            account_type: AccountType::Licensed,
+            access_token: Some(account.access_token),
+            licensed: account.has_minecraft_license,
+        });
+        self.status = if account.has_minecraft_license {
+            format!("Licensed account added: {}", account.username)
+        } else {
+            format!(
+                "Account added but no Minecraft entitlement: {}",
+                account.username
+            )
+        };
+        save_accounts(&self.accounts);
+        self.show_add_account_dialog = false;
+        self.device_login_info = None;
+        self.device_login_receiver = None;
+        self.device_login_status.clear();
+        self.device_login_qr_payload.clear();
+    }
+
+    fn do_start_device_code_login(&mut self) {
+        match start_microsoft_device_code(MSA_CLIENT_ID) {
+            Ok(device) => {
+                let open_url = device
+                    .verification_uri_complete
+                    .clone()
+                    .unwrap_or_else(|| device.verification_uri.clone());
+                let _ = Command::new("sh")
+                    .arg("-lc")
+                    .arg(format!("xdg-open {}", shell_escape(&open_url)))
+                    .status();
+
+                let (tx, rx) = mpsc::channel::<DeviceLoginEvent>();
+                let device_copy = device.clone();
+                std::thread::spawn(move || {
+                    let event = match complete_microsoft_device_login(MSA_CLIENT_ID, &device_copy) {
+                        Ok(result) => DeviceLoginEvent::Success(result),
+                        Err(err) => DeviceLoginEvent::Error(err),
+                    };
+                    let _ = tx.send(event);
+                });
+
+                self.device_login_qr_payload = open_url;
+                self.device_login_status =
+                    "Ожидание подтверждения в браузере/Microsoft...".to_string();
+                self.device_login_info = Some(device);
+                self.device_login_receiver = Some(rx);
+                self.status = "Microsoft login started".to_string();
+            }
+            Err(err) => {
+                self.status = format!("Failed to start Microsoft device login: {err}");
+            }
+        }
+    }
+
+    fn poll_device_login_events(&mut self) {
+        let event = self
+            .device_login_receiver
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
+        let Some(event) = event else {
+            return;
+        };
+        match event {
+            DeviceLoginEvent::Success(account) => {
+                self.apply_licensed_account(account);
+            }
+            DeviceLoginEvent::Error(err) => {
+                self.device_login_receiver = None;
+                self.device_login_info = None;
+                self.device_login_status = format!("Ошибка входа: {err}");
+                self.status = format!("Microsoft login failed: {err}");
             }
         }
     }
@@ -1235,6 +1332,39 @@ impl PrismarineApp {
         Some(texture)
     }
 
+    fn ensure_qr_texture(
+        &mut self,
+        ctx: &egui::Context,
+        payload: &str,
+    ) -> Option<egui::TextureHandle> {
+        let key = format!("qr::{payload}");
+        if let Some(tex) = self.icon_cache.get(&key) {
+            return Some(tex.clone());
+        }
+        let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
+        let qr = code
+            .render::<image::Luma<u8>>()
+            .min_dimensions(192, 192)
+            .max_dimensions(192, 192)
+            .build();
+        let w = qr.width() as usize;
+        let h = qr.height() as usize;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for p in qr.into_raw() {
+            rgba.push(p);
+            rgba.push(p);
+            rgba.push(p);
+            rgba.push(255);
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+        let tex = ctx.load_texture(key.clone(), image, egui::TextureOptions::NEAREST);
+        self.icon_cache.insert(key, tex.clone());
+        Some(tex)
+    }
+
     fn draw_instance_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label("Filter:");
@@ -1749,6 +1879,45 @@ impl PrismarineApp {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
+                    ui.label("Microsoft login (recommended):");
+                    ui.horizontal(|ui| {
+                        let login_running = self.device_login_receiver.is_some();
+                        if ui
+                            .add_enabled(
+                                !login_running,
+                                egui::Button::new("Login via Browser + Code/QR"),
+                            )
+                            .clicked()
+                        {
+                            self.do_start_device_code_login();
+                        }
+                        if let Some(device) = &self.device_login_info {
+                            let open_url = device
+                                .verification_uri_complete
+                                .clone()
+                                .unwrap_or_else(|| device.verification_uri.clone());
+                            if ui.button("Open Microsoft Page").clicked() {
+                                let _ = Command::new("sh")
+                                    .arg("-lc")
+                                    .arg(format!("xdg-open {}", shell_escape(&open_url)))
+                                    .status();
+                            }
+                        }
+                    });
+                    if let Some(device) = self.device_login_info.clone() {
+                        ui.separator();
+                        ui.label(format!("Code: {}", device.user_code));
+                        ui.label(format!("URL: {}", device.verification_uri));
+                        let qr_payload = self.device_login_qr_payload.clone();
+                        if let Some(tex) = self.ensure_qr_texture(ui.ctx(), &qr_payload) {
+                            ui.image((tex.id(), egui::vec2(192.0, 192.0)));
+                        }
+                        if !self.device_login_status.is_empty() {
+                            ui.label(&self.device_login_status);
+                        }
+                    }
+                    ui.separator();
+                    ui.label("Manual token fallback:");
                     ui.label("Display name:");
                     ui.text_edit_singleline(&mut self.new_account_name);
                     ui.label("Access token (Minecraft Services):");
@@ -1759,6 +1928,10 @@ impl PrismarineApp {
                         }
                         if ui.button("Cancel").clicked() {
                             self.show_add_account_dialog = false;
+                            self.device_login_receiver = None;
+                            self.device_login_info = None;
+                            self.device_login_status.clear();
+                            self.device_login_qr_payload.clear();
                         }
                     });
                 });
@@ -1769,6 +1942,7 @@ impl PrismarineApp {
 impl App for PrismarineApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         self.sync_process_states();
+        self.poll_device_login_events();
 
         if self.last_selected != self.selected {
             self.last_selected = self.selected;
