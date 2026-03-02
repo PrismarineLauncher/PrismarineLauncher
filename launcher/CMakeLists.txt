@@ -1349,6 +1349,10 @@ set_project_warnings(Launcher_logic
 target_include_directories(Launcher_logic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(Launcher_logic PUBLIC LAUNCHER_APPLICATION)
 
+if(Launcher_RUST_CORE_ENABLED)
+    target_compile_definitions(Launcher_logic PRIVATE LAUNCHER_ENABLE_RUST_CORE)
+endif()
+
 if(${Launcher_USE_PCH})
     target_precompile_headers(Launcher_logic PRIVATE ${PRECOMPILED_HEADERS})
 endif()
@@ -1403,6 +1407,12 @@ target_link_libraries(Launcher_logic
     LocalPeer
     Launcher_rainbow
 )
+if(Launcher_RUST_CORE_ENABLED)
+    target_link_libraries(Launcher_logic rust_core)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(Launcher_logic dl m pthread)
+    endif()
+endif()
 if (TARGET ${Launcher_QT_DBUS})
     add_compile_definitions(WITH_QTDBUS)
 endif()

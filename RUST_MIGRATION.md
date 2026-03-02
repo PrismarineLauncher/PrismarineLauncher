@@ -6,6 +6,8 @@ This repository now includes a Rust bootstrap in `rust/`.
 
 - Existing launcher remains in C++/Qt.
 - New Rust entry point is available for incremental migration.
+- Rust FFI bridge is wired into CMake (`cmake/RustCore.cmake`).
+- `ParseUtils` S3 timestamp parse/format path is migrated to Rust core with C++ fallback.
 
 ## Proposed migration order
 
@@ -18,5 +20,5 @@ This repository now includes a Rust bootstrap in `rust/`.
 ## Immediate next engineering steps
 
 1. Add Rust CI job (`cargo fmt`, `cargo clippy`, `cargo test`).
-2. Move one isolated parser module from C++ to Rust with parity tests.
+2. Move one isolated parser module from C++ to Rust with parity tests. (done for `ParseUtils`)
 3. Introduce FFI boundary for calling Rust from the current launcher.

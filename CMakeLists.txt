@@ -220,6 +220,7 @@ set(Launcher_SUBREDDIT_URL "https://prismlauncher.org/reddit" CACHE STRING "URL 
 set(Launcher_QT_VERSION_MAJOR "6" CACHE STRING "Major Qt version to build against")
 
 option(Launcher_USE_PCH "Use precompiled headers where possible" ON)
+option(Launcher_ENABLE_RUST_CORE "Build and link Rust core modules via FFI." ON)
 
 # Java downloader
 set(Launcher_ENABLE_JAVA_DOWNLOADER_DEFAULT ON)
@@ -500,6 +501,10 @@ add_subdirectory(buildconfig)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
+endif()
+
+if(Launcher_ENABLE_RUST_CORE)
+    include(cmake/RustCore.cmake)
 endif()
 # NOTE: this must always be last to appease the CMake deity of quirky install command evaluation order.
 add_subdirectory(launcher)
