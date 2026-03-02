@@ -4,8 +4,7 @@ use rust_core::{
     LaunchProfile, ModrinthSearchHit, build_java_command, copy_instance, create_instance,
     default_launch_profile, delete_instance, download_file_to_path, format_s3_time, list_logs,
     list_mod_files, load_launch_profile, modrinth_resolve_primary_file, modrinth_search_projects,
-    parse_s3_time, read_log_preview, rename_instance, save_launch_profile, scan_instances,
-    validate_minecraft_account,
+    parse_s3_time, read_log_preview, rename_instance, scan_instances, validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,8 +12,6 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-
-const STATE_FILE: &str = "rust/.state.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum CenterTab {
@@ -25,10 +22,49 @@ enum CenterTab {
     Settings,
 }
 
+impl Default for CenterTab {
+    fn default() -> Self {
+        Self::Overview
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum SettingsSubTab {
+    General,
+    Java,
+    Launch,
+    UserCommands,
+    Environment,
+}
+
+impl Default for SettingsSubTab {
+    fn default() -> Self {
+        Self::General
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+enum LaunchSettingsMode {
+    Basic,
+    Advanced,
+}
+
+impl Default for LaunchSettingsMode {
+    fn default() -> Self {
+        Self::Basic
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum AccountType {
     Offline,
     Licensed,
+}
+
+impl Default for AccountType {
+    fn default() -> Self {
+        Self::Offline
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,6 +76,7 @@ struct Instance {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 struct Account {
     name: String,
     active: bool,
@@ -48,25 +85,99 @@ struct Account {
     licensed: bool,
 }
 
+impl Default for Account {
+    fn default() -> Self {
+        Self {
+            name: "Offline".to_string(),
+            active: false,
+            account_type: AccountType::Offline,
+            access_token: None,
+            licensed: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct GlobalLaunchSettings {
+    mode: LaunchSettingsMode,
+    java_path: String,
+    skip_java_compat_check: bool,
+    min_memory_mb: u32,
+    max_memory_mb: u32,
+    permgen_mb: u32,
+    advanced_jvm_args: String,
+    user_commands: String,
+    environment_vars: String,
+}
+
+impl Default for GlobalLaunchSettings {
+    fn default() -> Self {
+        Self {
+            mode: LaunchSettingsMode::Basic,
+            java_path: "java".to_string(),
+            skip_java_compat_check: false,
+            min_memory_mb: 1024,
+            max_memory_mb: 4096,
+            permgen_mb: 128,
+            advanced_jvm_args: "-Xms1G\n-Xmx4G".to_string(),
+            user_commands: String::new(),
+            environment_vars: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedState {
-    data_dir: String,
+    #[serde(default)]
     selected: Option<usize>,
+    #[serde(default = "default_true")]
     show_news: bool,
+    #[serde(default)]
     filter: String,
+    #[serde(default)]
     active_tab: CenterTab,
 }
 
 impl Default for PersistedState {
     fn default() -> Self {
         Self {
-            data_dir: "instances".to_string(),
             selected: None,
             show_news: true,
             filter: String::new(),
             active_tab: CenterTab::Overview,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn local_data_root() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("PrismarineLauncher");
+    }
+    PathBuf::from(".").join(".local").join("PrismarineLauncher")
+}
+
+fn state_file_path() -> PathBuf {
+    local_data_root().join("ui_state.json")
+}
+
+fn accounts_file_path() -> PathBuf {
+    local_data_root().join("accounts.json")
+}
+
+fn global_settings_file_path() -> PathBuf {
+    local_data_root().join("global_launch_settings.json")
+}
+
+fn instances_root_path() -> PathBuf {
+    local_data_root().join("instances")
 }
 
 struct PrismarineApp {
@@ -77,7 +188,7 @@ struct PrismarineApp {
     show_news: bool,
     status: String,
     filter: String,
-    data_dir: String,
+    data_root: PathBuf,
     active_tab: CenterTab,
     show_create_dialog: bool,
     create_name: String,
@@ -91,7 +202,6 @@ struct PrismarineApp {
     selected_log: Option<usize>,
     log_preview: String,
     launch_profile: LaunchProfile,
-    launch_profile_dirty: bool,
     processes: HashMap<String, Child>,
     show_add_account_dialog: bool,
     new_account_name: String,
@@ -101,14 +211,18 @@ struct PrismarineApp {
     modrinth_game_version: String,
     modrinth_hits: Vec<ModrinthSearchHit>,
     selected_modrinth_hit: Option<usize>,
+    global_settings: GlobalLaunchSettings,
+    settings_subtab: SettingsSubTab,
 }
 
 impl Default for PrismarineApp {
     fn default() -> Self {
         let persisted = load_state().unwrap_or_default();
-        let mut app = Self {
-            instances: Vec::new(),
-            accounts: vec![
+        let data_root = local_data_root();
+        let _ = fs::create_dir_all(instances_root_path());
+        let mut accounts = load_accounts();
+        if accounts.is_empty() {
+            accounts = vec![
                 Account {
                     name: "Default Account".to_string(),
                     active: true,
@@ -123,13 +237,17 @@ impl Default for PrismarineApp {
                     access_token: None,
                     licensed: false,
                 },
-            ],
+            ];
+        }
+        let mut app = Self {
+            instances: Vec::new(),
+            accounts,
             selected: persisted.selected,
             last_selected: None,
             show_news: persisted.show_news,
             status: "Ready".to_string(),
             filter: persisted.filter,
-            data_dir: persisted.data_dir,
+            data_root,
             active_tab: persisted.active_tab,
             show_create_dialog: false,
             create_name: String::new(),
@@ -143,7 +261,6 @@ impl Default for PrismarineApp {
             selected_log: None,
             log_preview: String::new(),
             launch_profile: default_launch_profile(Path::new(".")),
-            launch_profile_dirty: false,
             processes: HashMap::new(),
             show_add_account_dialog: false,
             new_account_name: String::new(),
@@ -153,6 +270,8 @@ impl Default for PrismarineApp {
             modrinth_game_version: String::new(),
             modrinth_hits: Vec::new(),
             selected_modrinth_hit: None,
+            global_settings: load_global_settings(),
+            settings_subtab: SettingsSubTab::General,
         };
         app.reload_instances();
         app
@@ -169,13 +288,14 @@ impl PrismarineApp {
     }
 
     fn instance_root(&self) -> PathBuf {
-        PathBuf::from(&self.data_dir)
+        self.data_root.join("instances")
     }
 
     fn set_active_account(&mut self, idx: usize) {
         for (i, account) in self.accounts.iter_mut().enumerate() {
             account.active = i == idx;
         }
+        save_accounts(&self.accounts);
     }
 
     fn do_add_licensed_account(&mut self) {
@@ -205,6 +325,7 @@ impl PrismarineApp {
                 } else {
                     format!("Account added but no Minecraft entitlement: {account_name}")
                 };
+                save_accounts(&self.accounts);
                 self.new_account_name.clear();
                 self.new_account_token.clear();
                 self.show_add_account_dialog = false;
@@ -273,17 +394,17 @@ impl PrismarineApp {
 
     fn persist(&self) {
         let state = PersistedState {
-            data_dir: self.data_dir.clone(),
             selected: self.selected,
             show_news: self.show_news,
             filter: self.filter.clone(),
             active_tab: self.active_tab.clone(),
         };
         if let Ok(text) = serde_json::to_string_pretty(&state) {
-            if let Some(parent) = Path::new(STATE_FILE).parent() {
+            let path = state_file_path();
+            if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            let _ = fs::write(STATE_FILE, text);
+            let _ = fs::write(path, text);
         }
     }
 
@@ -301,7 +422,8 @@ impl PrismarineApp {
                     })
                     .collect();
                 if self.instances.is_empty() {
-                    self.status = format!("No instances found in {}", self.data_dir);
+                    self.status =
+                        format!("No instances found in {}", self.instance_root().display());
                     self.selected = None;
                 } else {
                     self.status = format!("Loaded {} instances", self.instances.len());
@@ -314,7 +436,7 @@ impl PrismarineApp {
             Err(err) => {
                 self.instances.clear();
                 self.selected = None;
-                self.status = format!("Failed to scan {}: {}", self.data_dir, err);
+                self.status = format!("Failed to scan {}: {}", self.instance_root().display(), err);
             }
         }
         self.refresh_selected_content();
@@ -354,11 +476,9 @@ impl PrismarineApp {
         match load_launch_profile(&path) {
             Ok(profile) => {
                 self.launch_profile = profile;
-                self.launch_profile_dirty = false;
             }
             Err(err) => {
                 self.launch_profile = default_launch_profile(&path);
-                self.launch_profile_dirty = false;
                 self.status = format!("Failed to load launch profile: {err}");
             }
         }
@@ -489,6 +609,29 @@ impl PrismarineApp {
 
         let instance_path = PathBuf::from(&instance.path);
         let mut profile = self.launch_profile.clone();
+        profile.java_path = self.global_settings.java_path.clone();
+        match self.global_settings.mode {
+            LaunchSettingsMode::Basic => {
+                let min_mb = self.global_settings.min_memory_mb.max(256);
+                let max_mb = self.global_settings.max_memory_mb.max(min_mb);
+                profile.jvm_args = vec![format!("-Xms{}M", min_mb), format!("-Xmx{}M", max_mb)];
+            }
+            LaunchSettingsMode::Advanced => {
+                profile.jvm_args = self
+                    .global_settings
+                    .advanced_jvm_args
+                    .lines()
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(ToString::to_string)
+                    .collect();
+            }
+        }
+        if self.global_settings.permgen_mb > 0 {
+            profile
+                .jvm_args
+                .push(format!("-XX:PermSize={}M", self.global_settings.permgen_mb));
+        }
         if profile.working_dir.trim().is_empty() {
             profile.working_dir = instance.path.clone();
         }
@@ -525,11 +668,35 @@ impl PrismarineApp {
         };
 
         let working_dir = PathBuf::from(&profile.working_dir);
+        for cmd_line in self
+            .global_settings
+            .user_commands
+            .lines()
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+        {
+            let _ = Command::new("sh")
+                .arg("-lc")
+                .arg(cmd_line)
+                .current_dir(&working_dir)
+                .status();
+        }
         let mut cmd = Command::new(exe);
         cmd.args(args)
             .current_dir(working_dir)
             .stdout(Stdio::from(stdout_log))
             .stderr(Stdio::from(stderr_log));
+        for line in self
+            .global_settings
+            .environment_vars
+            .lines()
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+        {
+            if let Some((k, v)) = line.split_once('=') {
+                cmd.env(k.trim(), v.trim());
+            }
+        }
 
         match cmd.spawn() {
             Ok(child) => {
@@ -563,22 +730,6 @@ impl PrismarineApp {
             self.status = format!("{} is not running", instance.name);
         }
         self.sync_process_states();
-    }
-
-    fn save_current_launch_profile(&mut self) {
-        let Some(path) = self.selected_instance_path() else {
-            self.status = "No instance selected".to_string();
-            return;
-        };
-        match save_launch_profile(&path, &self.launch_profile) {
-            Ok(_) => {
-                self.launch_profile_dirty = false;
-                self.status = "Launch profile saved".to_string();
-            }
-            Err(err) => {
-                self.status = format!("Failed to save launch profile: {err}");
-            }
-        }
     }
 
     fn open_create_dialog(&mut self) {
@@ -668,8 +819,8 @@ impl PrismarineApp {
             });
 
             ui.menu_button("Folders", |ui| {
-                ui.label("Data dir:");
-                ui.text_edit_singleline(&mut self.data_dir);
+                ui.label(format!("Data root: {}", self.data_root.display()));
+                ui.label(format!("Instances: {}", self.instance_root().display()));
                 if ui.button("Reload Instances").clicked() {
                     self.reload_instances();
                     ui.close();
@@ -866,81 +1017,177 @@ impl PrismarineApp {
     }
 
     fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
-        let Some(instance) = self.selected_instance() else {
-            ui.label("No instance selected");
-            return;
-        };
-
-        ui.label("Instance Launch Settings");
-        ui.separator();
-        ui.label(format!("Name: {}", instance.name));
-        ui.label(format!("Path: {}", instance.path));
-        ui.separator();
-
-        ui.label("Java executable:");
-        if ui
-            .text_edit_singleline(&mut self.launch_profile.java_path)
-            .changed()
-        {
-            self.launch_profile_dirty = true;
-        }
-        ui.label("Main class:");
-        if ui
-            .text_edit_singleline(&mut self.launch_profile.main_class)
-            .changed()
-        {
-            self.launch_profile_dirty = true;
-        }
-        ui.label("Working directory:");
-        if ui
-            .text_edit_singleline(&mut self.launch_profile.working_dir)
-            .changed()
-        {
-            self.launch_profile_dirty = true;
-        }
-
-        ui.separator();
-        ui.label("JVM args (one per line):");
-        let mut jvm_args_text = self.launch_profile.jvm_args.join("\n");
-        if ui
-            .add(egui::TextEdit::multiline(&mut jvm_args_text).desired_rows(4))
-            .changed()
-        {
-            self.launch_profile.jvm_args = jvm_args_text
-                .lines()
-                .map(str::trim)
-                .filter(|x| !x.is_empty())
-                .map(ToString::to_string)
-                .collect();
-            self.launch_profile_dirty = true;
-        }
-
-        ui.label("Game args (one per line):");
-        let mut game_args_text = self.launch_profile.game_args.join("\n");
-        if ui
-            .add(egui::TextEdit::multiline(&mut game_args_text).desired_rows(5))
-            .changed()
-        {
-            self.launch_profile.game_args = game_args_text
-                .lines()
-                .map(str::trim)
-                .filter(|x| !x.is_empty())
-                .map(ToString::to_string)
-                .collect();
-            self.launch_profile_dirty = true;
-        }
-
+        ui.heading("Параметры");
         ui.horizontal(|ui| {
-            if ui.button("Save Launch Profile").clicked() {
-                self.save_current_launch_profile();
+            if ui.button("Открыть глобальные параметры").clicked() {
+                self.status = "Глобальные параметры уже открыты справа.".to_string();
             }
-            if ui.button("Reload Launch Profile").clicked() {
-                self.refresh_selected_content();
-            }
-            if self.launch_profile_dirty {
-                ui.colored_label(egui::Color32::YELLOW, "Unsaved changes");
-            }
+            ui.label("Эти параметры переопределяют настройки экземпляра.");
         });
+        ui.separator();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::General, "Общие");
+            ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::Java, "Java");
+            ui.selectable_value(
+                &mut self.settings_subtab,
+                SettingsSubTab::Launch,
+                "Настройки",
+            );
+            ui.selectable_value(
+                &mut self.settings_subtab,
+                SettingsSubTab::UserCommands,
+                "Пользовательские команды",
+            );
+            ui.selectable_value(
+                &mut self.settings_subtab,
+                SettingsSubTab::Environment,
+                "Переменные окружения",
+            );
+        });
+        ui.separator();
+
+        let mut changed = false;
+
+        match self.settings_subtab {
+            SettingsSubTab::General => {
+                ui.group(|ui| {
+                    ui.label(format!("Хранилище: {}", self.data_root.display()));
+                    ui.label(format!("Экземпляры: {}", self.instance_root().display()));
+                    ui.label(
+                        "Все аккаунты и экземпляры хранятся в ~/.local/share/PrismarineLauncher.",
+                    );
+                });
+                ui.add_space(8.0);
+                ui.group(|ui| {
+                    ui.label("Режим настроек запуска");
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.global_settings.mode,
+                            LaunchSettingsMode::Basic,
+                            "Обычные",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.global_settings.mode,
+                            LaunchSettingsMode::Advanced,
+                            "Advanced",
+                        )
+                        .changed();
+                    ui.label("В обычном режиме доступны минимальная/максимальная память.");
+                });
+            }
+            SettingsSubTab::Java => {
+                ui.group(|ui| {
+                    ui.label("Установка Java");
+                    ui.label("Исполняемый файл Java");
+                    changed |= ui
+                        .text_edit_singleline(&mut self.global_settings.java_path)
+                        .changed();
+                    ui.horizontal(|ui| {
+                        if ui.button("Найти").clicked() {
+                            self.status =
+                                "Автопоиск Java будет добавлен следующим шагом.".to_string();
+                        }
+                        if ui.button("Обзор").clicked() {
+                            self.status =
+                                "Выбор файла Java через диалог будет добавлен следующим шагом."
+                                    .to_string();
+                        }
+                    });
+                    changed |= ui
+                        .checkbox(
+                            &mut self.global_settings.skip_java_compat_check,
+                            "Пропустить проверку совместимости Java",
+                        )
+                        .changed();
+                    if ui.button("Проверить настройки").clicked() {
+                        self.status =
+                            format!("Проверка Java: {}", self.global_settings.java_path.trim());
+                    }
+                });
+            }
+            SettingsSubTab::Launch => {
+                ui.group(|ui| {
+                    ui.label("Память");
+                    ui.horizontal(|ui| {
+                        ui.label("Минимальное использование памяти:");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.global_settings.min_memory_mb)
+                                    .speed(64)
+                                    .range(256..=131072),
+                            )
+                            .changed();
+                        ui.label("MiB (-Xms)");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Максимальное использование памяти:");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.global_settings.max_memory_mb)
+                                    .speed(64)
+                                    .range(256..=131072),
+                            )
+                            .changed();
+                        ui.label("MiB (-Xmx)");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Размер PermGen:");
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.global_settings.permgen_mb)
+                                    .speed(16)
+                                    .range(0..=4096),
+                            )
+                            .changed();
+                        ui.label("MiB (-XX:PermSize)");
+                    });
+                    if self.global_settings.max_memory_mb < self.global_settings.min_memory_mb {
+                        self.global_settings.max_memory_mb = self.global_settings.min_memory_mb;
+                        changed = true;
+                    }
+                });
+                ui.add_space(8.0);
+                ui.group(|ui| {
+                    ui.label("Аргументы Java");
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::multiline(&mut self.global_settings.advanced_jvm_args)
+                                .desired_rows(8),
+                        )
+                        .changed();
+                    ui.label("Используются в режиме Advanced.");
+                });
+            }
+            SettingsSubTab::UserCommands => {
+                ui.group(|ui| {
+                    ui.label("Пользовательские команды (по одной на строку)");
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::multiline(&mut self.global_settings.user_commands)
+                                .desired_rows(10),
+                        )
+                        .changed();
+                });
+            }
+            SettingsSubTab::Environment => {
+                ui.group(|ui| {
+                    ui.label("Переменные окружения (формат KEY=VALUE, по одной на строку)");
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::multiline(&mut self.global_settings.environment_vars)
+                                .desired_rows(10),
+                        )
+                        .changed();
+                });
+            }
+        }
+
+        if changed {
+            save_global_settings(&self.global_settings);
+        }
     }
 
     fn draw_dialogs(&mut self, ctx: &egui::Context) {
@@ -1072,11 +1319,7 @@ impl App for PrismarineApp {
                     self.status = "Checking updates".to_string();
                 }
                 ui.separator();
-                ui.label("Data dir:");
-                let response = ui.text_edit_singleline(&mut self.data_dir);
-                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.reload_instances();
-                }
+                ui.monospace(format!("Storage: {}", self.instance_root().display()));
             });
         });
 
@@ -1164,8 +1407,44 @@ impl App for PrismarineApp {
 }
 
 fn load_state() -> Option<PersistedState> {
-    let text = fs::read_to_string(STATE_FILE).ok()?;
+    let text = fs::read_to_string(state_file_path()).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn load_accounts() -> Vec<Account> {
+    let path = accounts_file_path();
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<Account>>(&text).unwrap_or_default()
+}
+
+fn save_accounts(accounts: &[Account]) {
+    let path = accounts_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(accounts) {
+        let _ = fs::write(path, text);
+    }
+}
+
+fn load_global_settings() -> GlobalLaunchSettings {
+    let path = global_settings_file_path();
+    let Ok(text) = fs::read_to_string(path) else {
+        return GlobalLaunchSettings::default();
+    };
+    serde_json::from_str::<GlobalLaunchSettings>(&text).unwrap_or_default()
+}
+
+fn save_global_settings(settings: &GlobalLaunchSettings) {
+    let path = global_settings_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(settings) {
+        let _ = fs::write(path, text);
+    }
 }
 
 fn main() -> Result<()> {
