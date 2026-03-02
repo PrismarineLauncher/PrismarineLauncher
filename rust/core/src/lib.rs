@@ -1,4 +1,5 @@
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, c_char};
 use std::fs;
@@ -33,6 +34,25 @@ pub struct LaunchProfile {
     pub classpath: Vec<String>,
     pub game_args: Vec<String>,
     pub working_dir: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccountValidation {
+    pub username: String,
+    pub has_minecraft_license: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModrinthSearchHit {
+    pub title: String,
+    pub project_id: String,
+    pub slug: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModrinthDownloadFile {
+    pub url: String,
+    pub filename: String,
 }
 
 pub fn default_launch_profile(instance_path: &Path) -> LaunchProfile {
@@ -301,6 +321,196 @@ pub fn build_java_command(profile: &LaunchProfile) -> (String, Vec<String>) {
     args.push(profile.main_class.clone());
     args.extend(profile.game_args.clone());
     (profile.java_path.clone(), args)
+}
+
+#[derive(Deserialize)]
+struct MinecraftProfileResponse {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct EntitlementsResponse {
+    items: Vec<serde_json::Value>,
+}
+
+pub fn validate_minecraft_account(access_token: &str) -> Result<AccountValidation, String> {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return Err("access token is empty".to_string());
+    }
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let profile = client
+        .get("https://api.minecraftservices.com/minecraft/profile")
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| format!("profile request failed: {e}"))?;
+    if !profile.status().is_success() {
+        return Err(format!("profile request returned {}", profile.status()));
+    }
+    let profile = profile
+        .json::<MinecraftProfileResponse>()
+        .map_err(|e| format!("failed to parse profile response: {e}"))?;
+
+    let entitlements = client
+        .get("https://api.minecraftservices.com/entitlements/mcstore")
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| format!("entitlements request failed: {e}"))?;
+    if !entitlements.status().is_success() {
+        return Err(format!(
+            "entitlements request returned {}",
+            entitlements.status()
+        ));
+    }
+    let entitlements = entitlements
+        .json::<EntitlementsResponse>()
+        .map_err(|e| format!("failed to parse entitlements response: {e}"))?;
+
+    Ok(AccountValidation {
+        username: profile.name,
+        has_minecraft_license: !entitlements.items.is_empty(),
+    })
+}
+
+#[derive(Deserialize)]
+struct ModrinthSearchResponse {
+    hits: Vec<ModrinthSearchHitResponse>,
+}
+
+#[derive(Deserialize)]
+struct ModrinthSearchHitResponse {
+    title: String,
+    project_id: String,
+    slug: String,
+}
+
+#[derive(Deserialize)]
+struct ModrinthVersionResponse {
+    game_versions: Vec<String>,
+    loaders: Vec<String>,
+    files: Vec<ModrinthVersionFileResponse>,
+}
+
+#[derive(Deserialize)]
+struct ModrinthVersionFileResponse {
+    url: String,
+    filename: String,
+    primary: Option<bool>,
+}
+
+pub fn modrinth_search_projects(
+    query: &str,
+    limit: usize,
+) -> Result<Vec<ModrinthSearchHit>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let response = client
+        .get("https://api.modrinth.com/v2/search")
+        .query(&[("query", q), ("limit", &limit.to_string())])
+        .send()
+        .map_err(|e| format!("modrinth search failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("modrinth search returned {}", response.status()));
+    }
+
+    let parsed = response
+        .json::<ModrinthSearchResponse>()
+        .map_err(|e| format!("failed to parse modrinth search response: {e}"))?;
+    Ok(parsed
+        .hits
+        .into_iter()
+        .map(|x| ModrinthSearchHit {
+            title: x.title,
+            project_id: x.project_id,
+            slug: x.slug,
+        })
+        .collect())
+}
+
+pub fn modrinth_resolve_primary_file(
+    project_id: &str,
+    game_version: &str,
+    loader: &str,
+) -> Result<ModrinthDownloadFile, String> {
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let response = client
+        .get(format!(
+            "https://api.modrinth.com/v2/project/{project_id}/version"
+        ))
+        .send()
+        .map_err(|e| format!("modrinth versions request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "modrinth versions request returned {}",
+            response.status()
+        ));
+    }
+
+    let versions = response
+        .json::<Vec<ModrinthVersionResponse>>()
+        .map_err(|e| format!("failed to parse modrinth versions response: {e}"))?;
+
+    let match_version = versions.into_iter().find(|v| {
+        let loader_ok = loader.trim().is_empty() || v.loaders.iter().any(|x| x == loader);
+        let game_ok =
+            game_version.trim().is_empty() || v.game_versions.iter().any(|x| x == game_version);
+        loader_ok && game_ok
+    });
+
+    let version = match_version.ok_or_else(|| "no matching modrinth version found".to_string())?;
+    let primary = version
+        .files
+        .iter()
+        .find(|f| f.primary.unwrap_or(false))
+        .or_else(|| version.files.first())
+        .ok_or_else(|| "selected modrinth version has no files".to_string())?;
+
+    Ok(ModrinthDownloadFile {
+        url: primary.url.clone(),
+        filename: primary.filename.clone(),
+    })
+}
+
+pub fn download_file_to_path(url: &str, path: &Path) -> Result<(), String> {
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("download request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("download returned {}", response.status()));
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|e| format!("failed to read download body: {e}"))?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create parent directory: {e}"))?;
+    }
+    fs::write(path, &bytes).map_err(|e| format!("failed to write file: {e}"))?;
+    Ok(())
 }
 
 #[unsafe(no_mangle)]
