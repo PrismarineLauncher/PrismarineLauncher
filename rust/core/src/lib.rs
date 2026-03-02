@@ -759,9 +759,21 @@ pub fn modrinth_search_projects(
     query: &str,
     limit: usize,
 ) -> Result<Vec<ModrinthSearchHit>, String> {
+    modrinth_search_projects_by_type(query, limit, "mod")
+}
+
+pub fn modrinth_search_projects_by_type(
+    query: &str,
+    limit: usize,
+    project_type: &str,
+) -> Result<Vec<ModrinthSearchHit>, String> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
+    }
+    let project_type = project_type.trim();
+    if project_type.is_empty() {
+        return Err("modrinth project_type is empty".to_string());
     }
 
     let client = Client::builder()
@@ -769,9 +781,15 @@ pub fn modrinth_search_projects(
         .build()
         .map_err(|e| format!("failed to build http client: {e}"))?;
 
+    let facets = format!("[[\"project_type:{project_type}\"]]");
+
     let response = client
         .get("https://api.modrinth.com/v2/search")
-        .query(&[("query", q), ("limit", &limit.to_string())])
+        .query(&[
+            ("query", q),
+            ("limit", &limit.to_string()),
+            ("facets", facets.as_str()),
+        ])
         .send()
         .map_err(|e| format!("modrinth search failed: {e}"))?;
     if !response.status().is_success() {

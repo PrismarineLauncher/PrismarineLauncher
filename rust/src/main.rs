@@ -5,7 +5,7 @@ use rust_core::{
     build_java_command, complete_microsoft_device_login, copy_instance, create_instance,
     default_launch_profile, delete_instance, download_file_to_path, format_s3_time, list_logs,
     list_mod_files, load_launch_profile, load_prism_instance_config, modrinth_resolve_primary_file,
-    modrinth_search_projects, parse_s3_time, read_log_preview, rename_instance,
+    modrinth_search_projects_by_type, parse_s3_time, read_log_preview, rename_instance,
     save_launch_profile, scan_instances, start_microsoft_device_code, sync_modrinth_managed_mods,
     validate_minecraft_account,
 };
@@ -79,6 +79,34 @@ enum DownloadProvider {
 impl Default for DownloadProvider {
     fn default() -> Self {
         Self::Modrinth
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+enum DownloadContentType {
+    Mods,
+    ResourcePacks,
+}
+
+impl DownloadContentType {
+    fn modrinth_project_type(&self) -> &'static str {
+        match self {
+            Self::Mods => "mod",
+            Self::ResourcePacks => "resourcepack",
+        }
+    }
+
+    fn curseforge_class(&self) -> &'static str {
+        match self {
+            Self::Mods => "mc-mods",
+            Self::ResourcePacks => "texture-packs",
+        }
+    }
+}
+
+impl Default for DownloadContentType {
+    fn default() -> Self {
+        Self::Mods
     }
 }
 
@@ -280,6 +308,7 @@ struct PrismarineApp {
     device_login_qr_payload: String,
     show_download_panel: bool,
     download_provider: DownloadProvider,
+    download_content_type: DownloadContentType,
     modrinth_query: String,
     modrinth_loader: String,
     modrinth_game_version: String,
@@ -352,6 +381,7 @@ impl Default for PrismarineApp {
             device_login_qr_payload: String::new(),
             show_download_panel: false,
             download_provider: DownloadProvider::Modrinth,
+            download_content_type: DownloadContentType::Mods,
             modrinth_query: String::new(),
             modrinth_loader: String::new(),
             modrinth_game_version: String::new(),
@@ -550,7 +580,11 @@ impl PrismarineApp {
     }
 
     fn do_modrinth_search(&mut self) {
-        match modrinth_search_projects(&self.modrinth_query, 20) {
+        match modrinth_search_projects_by_type(
+            &self.modrinth_query,
+            20,
+            self.download_content_type.modrinth_project_type(),
+        ) {
             Ok(hits) => {
                 self.modrinth_hits = hits;
                 self.selected_modrinth_hit = if self.modrinth_hits.is_empty() {
@@ -567,8 +601,10 @@ impl PrismarineApp {
     }
 
     fn open_curseforge_search(&mut self) {
-        let mut url =
-            "https://www.curseforge.com/minecraft/search?class=mc-mods&search=".to_string();
+        let mut url = format!(
+            "https://www.curseforge.com/minecraft/search?class={}&search=",
+            self.download_content_type.curseforge_class()
+        );
         url.push_str(&percent_encode_query(self.curseforge_query.trim()));
         if !self.modrinth_game_version.trim().is_empty() {
             url.push_str("&gameVersion=");
@@ -604,12 +640,16 @@ impl PrismarineApp {
                 .next()
                 .map(|x| x.split('?').next().unwrap_or(x))
                 .filter(|x| !x.trim().is_empty())
-                .unwrap_or("downloaded-mod.jar")
+                .unwrap_or(match self.download_content_type {
+                    DownloadContentType::Mods => "downloaded-mod.jar",
+                    DownloadContentType::ResourcePacks => "downloaded-resourcepack.zip",
+                })
                 .to_string()
         } else {
             self.curseforge_filename.trim().to_string()
         };
-        let target = preferred_mods_dir(&instance_path).join(&file_name);
+        let target =
+            preferred_download_dir(&instance_path, &self.download_content_type).join(&file_name);
         match download_file_to_path(&url, &target) {
             Ok(_) => {
                 self.status = format!("Downloaded {} -> {}", file_name, target.display());
@@ -636,11 +676,15 @@ impl PrismarineApp {
         };
         let hit = self.modrinth_hits[hit_idx].clone();
         let version = self.modrinth_game_version.trim();
-        let loader = self.modrinth_loader.trim();
+        let loader = match self.download_content_type {
+            DownloadContentType::Mods => self.modrinth_loader.trim(),
+            DownloadContentType::ResourcePacks => "",
+        };
 
         match modrinth_resolve_primary_file(&hit.project_id, version, loader) {
             Ok(file) => {
-                let target = preferred_mods_dir(&instance_path).join(&file.filename);
+                let target = preferred_download_dir(&instance_path, &self.download_content_type)
+                    .join(&file.filename);
                 match download_file_to_path(&file.url, &target) {
                     Ok(_) => {
                         self.status =
@@ -1618,7 +1662,17 @@ impl PrismarineApp {
         ui.separator();
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.heading("Скачивание модов");
+                ui.heading("Скачивание");
+                ui.selectable_value(
+                    &mut self.download_content_type,
+                    DownloadContentType::Mods,
+                    "Mods",
+                );
+                ui.selectable_value(
+                    &mut self.download_content_type,
+                    DownloadContentType::ResourcePacks,
+                    "Resource Packs",
+                );
                 ui.selectable_value(
                     &mut self.download_provider,
                     DownloadProvider::Modrinth,
@@ -1700,12 +1754,12 @@ impl PrismarineApp {
                     ui.horizontal(|ui| {
                         ui.label("Filename (optional):");
                         ui.text_edit_singleline(&mut self.curseforge_filename);
-                        if ui.button("Download URL To mods/").clicked() {
+                        if ui.button("Download URL").clicked() {
                             self.do_curseforge_download_url();
                         }
                     });
                     ui.label(
-                        "В CurseForge режиме поиск открывается в браузере, а прямая ссылка скачивается в mods/ выбранного инстанса.",
+                        "В CurseForge режиме поиск открывается в браузере, а прямая ссылка скачивается в выбранную папку инстанса (mods/resourcepacks).",
                     );
                 }
             }
@@ -2286,6 +2340,29 @@ fn preferred_mods_dir(instance_path: &Path) -> PathBuf {
     let fallback = instance_path.join("minecraft/mods");
     let _ = fs::create_dir_all(&fallback);
     fallback
+}
+
+fn preferred_resourcepacks_dir(instance_path: &Path) -> PathBuf {
+    let candidates = [
+        instance_path.join("minecraft/resourcepacks"),
+        instance_path.join(".minecraft/resourcepacks"),
+        instance_path.join("resourcepacks"),
+    ];
+    for candidate in candidates {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    let fallback = instance_path.join("minecraft/resourcepacks");
+    let _ = fs::create_dir_all(&fallback);
+    fallback
+}
+
+fn preferred_download_dir(instance_path: &Path, content_type: &DownloadContentType) -> PathBuf {
+    match content_type {
+        DownloadContentType::Mods => preferred_mods_dir(instance_path),
+        DownloadContentType::ResourcePacks => preferred_resourcepacks_dir(instance_path),
+    }
 }
 
 fn load_state() -> Option<PersistedState> {
