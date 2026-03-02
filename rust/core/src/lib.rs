@@ -134,6 +134,14 @@ pub struct CurseForgeProjectDetails {
     pub icon_url: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RuntimeDownloadProgress {
+    pub stage: String,
+    pub done: usize,
+    pub total: usize,
+    pub message: String,
+}
+
 pub fn default_launch_profile(instance_path: &Path) -> LaunchProfile {
     let game_dir = if instance_path.join("minecraft").is_dir() {
         instance_path.join("minecraft")
@@ -709,12 +717,16 @@ fn extract_natives_from_jar(jar_path: &Path, natives_dir: &Path) -> Result<(), S
     Ok(())
 }
 
-pub fn ensure_minecraft_runtime(
+pub fn ensure_minecraft_runtime_with_progress<F>(
     data_root: &Path,
     instance_path: &Path,
     version_id: &str,
     profile: &mut LaunchProfile,
-) -> Result<(), String> {
+    mut on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(RuntimeDownloadProgress),
+{
     let version_id = version_id.trim();
     if version_id.is_empty() {
         return Err("instance version is empty".to_string());
@@ -724,6 +736,12 @@ pub fn ensure_minecraft_runtime(
         .user_agent("PrismarineLauncher-Rust")
         .build()
         .map_err(|e| format!("failed to build http client: {e}"))?;
+    on_progress(RuntimeDownloadProgress {
+        stage: "meta".to_string(),
+        done: 0,
+        total: 1,
+        message: format!("Loading metadata for {version_id}"),
+    });
 
     let mut version_json = load_mojang_version_json(&client, data_root, version_id)?;
     if let Some(parent_id) = version_json
@@ -764,6 +782,12 @@ pub fn ensure_minecraft_runtime(
     let client_sha1 = client_download.get("sha1").and_then(|x| x.as_str());
     let client_jar = versions_dir.join(format!("{version_id}.jar"));
     ensure_url_to_path(&client, client_url, &client_jar, client_sha1)?;
+    on_progress(RuntimeDownloadProgress {
+        stage: "client".to_string(),
+        done: 1,
+        total: 1,
+        message: "Client jar ready".to_string(),
+    });
 
     let asset_index = version_json
         .get("assetIndex")
@@ -785,6 +809,8 @@ pub fn ensure_minecraft_runtime(
     let asset_index_json = serde_json::from_str::<serde_json::Value>(&asset_index_text)
         .map_err(|e| format!("failed to parse asset index {}: {e}", asset_index_path.display()))?;
     if let Some(objects) = asset_index_json.get("objects").and_then(|x| x.as_object()) {
+        let total_assets = objects.len().max(1);
+        let mut asset_done = 0usize;
         for object in objects.values() {
             let Some(hash) = object.get("hash").and_then(|x| x.as_str()) else {
                 continue;
@@ -794,6 +820,7 @@ pub fn ensure_minecraft_runtime(
             }
             let target = assets_dir.join("objects").join(&hash[0..2]).join(hash);
             if target.is_file() {
+                asset_done += 1;
                 continue;
             }
             let obj_url = format!(
@@ -802,13 +829,25 @@ pub fn ensure_minecraft_runtime(
                 hash
             );
             ensure_url_to_path(&client, &obj_url, &target, Some(hash))?;
+            asset_done += 1;
+            if asset_done.is_multiple_of(25) || asset_done == total_assets {
+                on_progress(RuntimeDownloadProgress {
+                    stage: "assets".to_string(),
+                    done: asset_done,
+                    total: total_assets,
+                    message: format!("Assets {asset_done}/{total_assets}"),
+                });
+            }
         }
     }
 
     let mut classpath = Vec::new();
     if let Some(libraries) = version_json.get("libraries").and_then(|x| x.as_array()) {
+        let total_libs = libraries.len().max(1);
+        let mut libs_done = 0usize;
         for lib in libraries {
             if !rules_allow_library(lib) {
+                libs_done += 1;
                 continue;
             }
             if let Some(artifact) = lib.get("downloads").and_then(|d| d.get("artifact")) {
@@ -842,6 +881,15 @@ pub fn ensure_minecraft_runtime(
                     extract_natives_from_jar(&native_jar, &natives_dir)?;
                 }
             }
+            libs_done += 1;
+            if libs_done.is_multiple_of(15) || libs_done == total_libs {
+                on_progress(RuntimeDownloadProgress {
+                    stage: "libraries".to_string(),
+                    done: libs_done,
+                    total: total_libs,
+                    message: format!("Libraries {libs_done}/{total_libs}"),
+                });
+            }
         }
     }
     classpath.push(client_jar.display().to_string());
@@ -872,8 +920,23 @@ pub fn ensure_minecraft_runtime(
         "java.library.path",
         &natives_dir.display().to_string(),
     );
+    on_progress(RuntimeDownloadProgress {
+        stage: "done".to_string(),
+        done: 1,
+        total: 1,
+        message: "Runtime ready".to_string(),
+    });
 
     Ok(())
+}
+
+pub fn ensure_minecraft_runtime(
+    data_root: &Path,
+    instance_path: &Path,
+    version_id: &str,
+    profile: &mut LaunchProfile,
+) -> Result<(), String> {
+    ensure_minecraft_runtime_with_progress(data_root, instance_path, version_id, profile, |_| {})
 }
 
 #[derive(Deserialize)]

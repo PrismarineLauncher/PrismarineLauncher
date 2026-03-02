@@ -2,16 +2,16 @@ use anyhow::Result;
 use eframe::{App, Frame, NativeOptions, egui};
 use rust_core::{
     CurseForgeProjectDetails, CurseForgeSearchHit, LaunchProfile, LicensedMicrosoftAccount,
-    MicrosoftDeviceCode, ModrinthProjectDetails, ModrinthSearchHit, build_java_command,
-    complete_microsoft_device_login, copy_instance, create_instance,
+    MicrosoftDeviceCode, ModrinthProjectDetails, ModrinthSearchHit, RuntimeDownloadProgress,
+    build_java_command, complete_microsoft_device_login, copy_instance, create_instance,
     curseforge_get_project_details, curseforge_resolve_primary_file,
     curseforge_search_projects_paged, default_launch_profile, delete_instance,
-    download_file_to_path, download_file_to_path_with_progress, ensure_minecraft_runtime,
-    format_s3_time, list_logs, list_mod_files, load_launch_profile, load_prism_instance_config,
-    modrinth_get_project_details, modrinth_resolve_primary_file,
-    modrinth_search_projects_by_type_paged, parse_s3_time, read_log_preview, rename_instance,
-    save_launch_profile, scan_instances, start_microsoft_device_code, sync_modrinth_managed_mods,
-    validate_minecraft_account,
+    download_file_to_path, download_file_to_path_with_progress,
+    ensure_minecraft_runtime_with_progress, format_s3_time, list_logs, list_mod_files,
+    load_launch_profile, load_prism_instance_config, modrinth_get_project_details,
+    modrinth_resolve_primary_file, modrinth_search_projects_by_type_paged, parse_s3_time,
+    read_log_preview, rename_instance, save_launch_profile, scan_instances,
+    start_microsoft_device_code, sync_modrinth_managed_mods, validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -352,6 +352,10 @@ enum LaunchWorkerEvent {
         instance_path: String,
         message: String,
     },
+    Progress {
+        instance_path: String,
+        progress: RuntimeDownloadProgress,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -452,6 +456,7 @@ struct PrismarineApp {
     copy_name: String,
     show_delete_dialog: bool,
     mods_cache: Vec<ModListEntry>,
+    mods_filter: String,
     logs_cache: Vec<(String, String)>,
     selected_log: Option<usize>,
     log_preview: String,
@@ -504,6 +509,7 @@ struct PrismarineApp {
     launch_worker_rx: Receiver<LaunchWorkerEvent>,
     launch_in_progress: HashSet<String>,
     pending_launches: HashMap<String, PendingLaunchContext>,
+    launch_progress: HashMap<String, RuntimeDownloadProgress>,
     create_versions_loading: bool,
     create_versions: Vec<String>,
     create_versions_receiver: Option<Receiver<Result<Vec<String>, String>>>,
@@ -557,6 +563,7 @@ impl Default for PrismarineApp {
             copy_name: String::new(),
             show_delete_dialog: false,
             mods_cache: Vec::new(),
+            mods_filter: String::new(),
             logs_cache: Vec::new(),
             selected_log: None,
             log_preview: String::new(),
@@ -609,6 +616,7 @@ impl Default for PrismarineApp {
             launch_worker_rx,
             launch_in_progress: HashSet::new(),
             pending_launches: HashMap::new(),
+            launch_progress: HashMap::new(),
             create_versions_loading: false,
             create_versions: Vec::new(),
             create_versions_receiver: None,
@@ -2044,6 +2052,19 @@ impl PrismarineApp {
         }
     }
 
+    fn do_delete_mod_file(&mut self, file_path: &str) {
+        let path = PathBuf::from(file_path);
+        match fs::remove_file(&path) {
+            Ok(_) => {
+                self.status = format!("Deleted mod: {}", path.display());
+                self.refresh_selected_content();
+            }
+            Err(err) => {
+                self.status = format!("Failed to delete mod {}: {err}", path.display());
+            }
+        }
+    }
+
     fn reload_instances(&mut self) {
         let root = self.instance_root();
         match scan_instances(&root) {
@@ -2613,11 +2634,17 @@ impl PrismarineApp {
                         instance_version
                     ),
                 });
-                if let Err(err) = ensure_minecraft_runtime(
+                if let Err(err) = ensure_minecraft_runtime_with_progress(
                     &data_root,
                     &instance_path_copy,
                     &instance_version,
                     &mut profile,
+                    |progress| {
+                        let _ = tx.send(LaunchWorkerEvent::Progress {
+                            instance_path: instance_key.clone(),
+                            progress,
+                        });
+                    },
                 ) {
                     let _ = tx.send(LaunchWorkerEvent::Error {
                         instance_path: instance_key,
@@ -2655,6 +2682,7 @@ impl PrismarineApp {
                 } => {
                     self.launch_in_progress.remove(&instance_path);
                     self.pending_launches.remove(&instance_path);
+                    self.launch_progress.remove(&instance_path);
                     self.append_launcher_log(
                         &instance_path,
                         &format!("[Launcher] ERROR: {message}"),
@@ -2662,11 +2690,23 @@ impl PrismarineApp {
                     self.status = message;
                     self.refresh_selected_content();
                 }
+                LaunchWorkerEvent::Progress {
+                    instance_path,
+                    progress,
+                } => {
+                    self.launch_progress
+                        .insert(instance_path.clone(), progress.clone());
+                    self.status = progress.message.clone();
+                    if self.active_tab == CenterTab::Logs {
+                        self.refresh_selected_content();
+                    }
+                }
                 LaunchWorkerEvent::Ready {
                     instance_path,
                     profile,
                 } => {
                     self.launch_in_progress.remove(&instance_path);
+                    self.launch_progress.remove(&instance_path);
                     if let Some(ctx) = self.pending_launches.remove(&instance_path) {
                         self.spawn_prepared_instance(ctx, profile);
                     }
@@ -3196,11 +3236,30 @@ impl PrismarineApp {
             }
             ui.label(format!("Total: {}", self.mods_cache.len()));
         });
+        ui.horizontal(|ui| {
+            ui.label("Installed mods search:");
+            ui.text_edit_singleline(&mut self.mods_filter);
+        });
         ui.separator();
 
         let mut pending_toggle: Option<(String, bool)> = None;
+        let mut pending_delete: Option<String> = None;
+        let filtered_mods: Vec<ModListEntry> = if self.mods_filter.trim().is_empty() {
+            self.mods_cache.clone()
+        } else {
+            let needle = self.mods_filter.to_lowercase();
+            self.mods_cache
+                .iter()
+                .filter(|m| {
+                    m.display_name.to_lowercase().contains(&needle)
+                        || m.name.to_lowercase().contains(&needle)
+                        || m.provider.to_lowercase().contains(&needle)
+                })
+                .cloned()
+                .collect()
+        };
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(18.0);
-        if self.mods_cache.is_empty() {
+        if filtered_mods.is_empty() {
             ui.label("No mods found");
         } else {
             ui.horizontal(|ui| {
@@ -3223,7 +3282,7 @@ impl PrismarineApp {
                 .show_rows(
                     ui,
                     row_height + 6.0,
-                    self.mods_cache.len(),
+                    filtered_mods.len(),
                     |ui, row_range| {
                         for idx in row_range {
                             let (
@@ -3235,7 +3294,7 @@ impl PrismarineApp {
                                 updated_at,
                                 provider,
                             ) = {
-                                let item = &self.mods_cache[idx];
+                                let item = &filtered_mods[idx];
                                 (
                                     item.enabled,
                                     item.file_path.clone(),
@@ -3262,7 +3321,13 @@ impl PrismarineApp {
                                 } else {
                                     ui.add_space(row_height);
                                 }
-                                ui.label(display_name.as_str());
+                                let label_response = ui.label(display_name.as_str());
+                                label_response.context_menu(|ui| {
+                                    if ui.button("Delete mod").clicked() {
+                                        pending_delete = Some(file_path.clone());
+                                        ui.close();
+                                    }
+                                });
                                 ui.add_space(20.0);
                                 ui.monospace(version.as_str());
                                 ui.add_space(20.0);
@@ -3277,6 +3342,9 @@ impl PrismarineApp {
         }
         if let Some((file_path, enabled)) = pending_toggle {
             self.do_toggle_mod_enabled(&file_path, enabled);
+        }
+        if let Some(file_path) = pending_delete {
+            self.do_delete_mod_file(&file_path);
         }
 
         if !self.show_download_panel {
@@ -4205,9 +4273,27 @@ impl App for PrismarineApp {
         });
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Status:");
                 ui.monospace(&self.status);
+                if !self.launch_progress.is_empty() {
+                    ui.separator();
+                    if let Some(selected) = self.selected_instance()
+                        && let Some(p) = self.launch_progress.get(&selected.path)
+                    {
+                        let total = p.total.max(1) as f32;
+                        let value = (p.done as f32 / total).clamp(0.0, 1.0);
+                        ui.label(format!("Download {}:", p.stage));
+                        ui.add(egui::ProgressBar::new(value).desired_width(220.0));
+                        ui.monospace(format!("{}/{}", p.done, p.total));
+                    } else if let Some((_, p)) = self.launch_progress.iter().next() {
+                        let total = p.total.max(1) as f32;
+                        let value = (p.done as f32 / total).clamp(0.0, 1.0);
+                        ui.label(format!("Download {}:", p.stage));
+                        ui.add(egui::ProgressBar::new(value).desired_width(220.0));
+                        ui.monospace(format!("{}/{}", p.done, p.total));
+                    }
+                }
             });
         });
 
