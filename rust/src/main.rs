@@ -2162,6 +2162,20 @@ impl PrismarineApp {
                     .into_iter()
                     .map(|x| (x.file_name, x.path.display().to_string()))
                     .collect();
+                if !self.logs_cache.is_empty() {
+                    let preferred = self
+                        .logs_cache
+                        .iter()
+                        .position(|(name, _)| name == "launcher.log")
+                        .or_else(|| {
+                            self.logs_cache
+                                .iter()
+                                .position(|(name, _)| name == "latest.log")
+                        })
+                        .unwrap_or(0);
+                    self.selected_log = Some(preferred);
+                    self.open_selected_log_preview();
+                }
             }
             Err(err) => {
                 self.status = format!("Failed to load logs: {err}");
@@ -2570,6 +2584,11 @@ impl PrismarineApp {
         );
         self.launch_in_progress.insert(instance.path.clone());
         self.status = format!("Preparing launch for {}...", instance.name);
+        self.append_launcher_log(
+            &instance.path,
+            &format!("[Launcher] Preparing launch for {}", instance.name),
+        );
+        self.refresh_selected_content();
 
         let tx = self.launch_worker_tx.clone();
         let data_root = self.data_root.clone();
@@ -2621,10 +2640,14 @@ impl PrismarineApp {
             };
             match event {
                 LaunchWorkerEvent::Status {
-                    instance_path: _instance_path,
+                    instance_path,
                     message,
                 } => {
+                    self.append_launcher_log(&instance_path, &format!("[Launcher] {message}"));
                     self.status = message;
+                    if self.active_tab == CenterTab::Logs {
+                        self.refresh_selected_content();
+                    }
                 }
                 LaunchWorkerEvent::Error {
                     instance_path,
@@ -2632,7 +2655,12 @@ impl PrismarineApp {
                 } => {
                     self.launch_in_progress.remove(&instance_path);
                     self.pending_launches.remove(&instance_path);
+                    self.append_launcher_log(
+                        &instance_path,
+                        &format!("[Launcher] ERROR: {message}"),
+                    );
                     self.status = message;
+                    self.refresh_selected_content();
                 }
                 LaunchWorkerEvent::Ready {
                     instance_path,
@@ -2667,11 +2695,10 @@ impl PrismarineApp {
         };
         let _ = writeln!(
             log_file,
-            "[Launcher] Starting instance {}\n[Launcher] Command: {} {}",
-            ctx.instance.name,
-            exe,
-            args.join(" ")
+            "[Launcher] Starting instance {}",
+            ctx.instance.name
         );
+        let _ = writeln!(log_file, "[Launcher] Command: {} {}", exe, args.join(" "));
         let stdout_log = match log_file.try_clone() {
             Ok(f) => f,
             Err(err) => {
@@ -2717,10 +2744,25 @@ impl PrismarineApp {
                 }
                 self.status = format!("Launched {}", ctx.instance.name);
                 self.sync_process_states();
+                self.refresh_selected_content();
             }
             Err(err) => {
                 self.status = format!("Failed to launch {}: {}", ctx.instance.name, err);
+                self.append_launcher_log(
+                    &ctx.instance.path,
+                    &format!("[Launcher] Failed to spawn process: {err}"),
+                );
+                self.refresh_selected_content();
             }
+        }
+    }
+
+    fn append_launcher_log(&self, instance_path: &str, line: &str) {
+        let logs_dir = PathBuf::from(instance_path).join("logs");
+        let _ = fs::create_dir_all(&logs_dir);
+        let path = logs_dir.join("launcher.log");
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{}", line);
         }
     }
 
@@ -3543,29 +3585,33 @@ impl PrismarineApp {
         ui.columns(2, |cols| {
             cols[0].label("Log files");
             cols[0].separator();
-            egui::ScrollArea::vertical().show(&mut cols[0], |ui| {
-                let mut clicked_index = None;
-                for (idx, (name, _)) in self.logs_cache.iter().enumerate() {
-                    let selected = self.selected_log == Some(idx);
-                    if ui.selectable_label(selected, name).clicked() {
-                        clicked_index = Some(idx);
+            egui::ScrollArea::vertical()
+                .id_salt("logs_files_scroll")
+                .show(&mut cols[0], |ui| {
+                    let mut clicked_index = None;
+                    for (idx, (name, _)) in self.logs_cache.iter().enumerate() {
+                        let selected = self.selected_log == Some(idx);
+                        if ui.selectable_label(selected, name).clicked() {
+                            clicked_index = Some(idx);
+                        }
                     }
-                }
-                if let Some(idx) = clicked_index {
-                    self.selected_log = Some(idx);
-                    self.open_selected_log_preview();
-                }
-            });
+                    if let Some(idx) = clicked_index {
+                        self.selected_log = Some(idx);
+                        self.open_selected_log_preview();
+                    }
+                });
 
             cols[1].label("Preview");
             cols[1].separator();
-            egui::ScrollArea::vertical().show(&mut cols[1], |ui| {
-                if self.log_preview.is_empty() {
-                    ui.label("No log selected");
-                } else {
-                    ui.monospace(&self.log_preview);
-                }
-            });
+            egui::ScrollArea::vertical()
+                .id_salt("logs_preview_scroll")
+                .show(&mut cols[1], |ui| {
+                    if self.log_preview.is_empty() {
+                        ui.label("No log selected");
+                    } else {
+                        ui.monospace(&self.log_preview);
+                    }
+                });
         });
     }
 
