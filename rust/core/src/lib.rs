@@ -819,13 +819,22 @@ pub fn modrinth_search_projects(
     query: &str,
     limit: usize,
 ) -> Result<Vec<ModrinthSearchHit>, String> {
-    modrinth_search_projects_by_type(query, limit, "mod")
+    modrinth_search_projects_by_type_paged(query, limit, "mod", 0)
 }
 
 pub fn modrinth_search_projects_by_type(
     query: &str,
     limit: usize,
     project_type: &str,
+) -> Result<Vec<ModrinthSearchHit>, String> {
+    modrinth_search_projects_by_type_paged(query, limit, project_type, 0)
+}
+
+pub fn modrinth_search_projects_by_type_paged(
+    query: &str,
+    limit: usize,
+    project_type: &str,
+    offset: usize,
 ) -> Result<Vec<ModrinthSearchHit>, String> {
     let q = query.trim();
     if q.is_empty() {
@@ -848,6 +857,7 @@ pub fn modrinth_search_projects_by_type(
         .query(&[
             ("query", q),
             ("limit", &limit.to_string()),
+            ("offset", &offset.to_string()),
             ("facets", facets.as_str()),
         ])
         .send()
@@ -1032,6 +1042,17 @@ pub fn curseforge_search_projects(
     class_id: i32,
     limit: usize,
 ) -> Result<Vec<CurseForgeSearchHit>, String> {
+    curseforge_search_projects_paged(api_key, query, game_version, class_id, limit, 0)
+}
+
+pub fn curseforge_search_projects_paged(
+    api_key: &str,
+    query: &str,
+    game_version: &str,
+    class_id: i32,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<CurseForgeSearchHit>, String> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
@@ -1053,6 +1074,7 @@ pub fn curseforge_search_projects(
             ("classId", &class_id.to_string()),
             ("searchFilter", q),
             ("pageSize", &limit.to_string()),
+            ("index", &offset.to_string()),
         ]);
     if !game_version.trim().is_empty() {
         req = req.query(&[("gameVersion", game_version.trim())]);
