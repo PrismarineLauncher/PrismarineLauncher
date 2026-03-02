@@ -13,7 +13,7 @@ use rust_core::{
     start_microsoft_device_code, sync_modrinth_managed_mods, validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1541,6 +1541,102 @@ impl PrismarineApp {
             Err(err) => {
                 self.status = format!("Failed to add jar: {err}");
             }
+        }
+    }
+
+    fn probe_java_runtime(path: &Path) -> Option<String> {
+        let output = Command::new(path).arg("-version").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let merged = format!("{stderr}\n{stdout}");
+        merged
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(ToString::to_string)
+    }
+
+    fn discover_java_candidates() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(path_var) = std::env::var("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                out.push(dir.join("java"));
+                out.push(dir.join("java.exe"));
+            }
+        }
+        out.push(PathBuf::from("/usr/bin/java"));
+        out.push(PathBuf::from("/usr/local/bin/java"));
+        if let Ok(home) = std::env::var("HOME") {
+            out.push(
+                PathBuf::from(&home)
+                    .join(".sdkman")
+                    .join("candidates")
+                    .join("java")
+                    .join("current")
+                    .join("bin")
+                    .join("java"),
+            );
+            out.push(PathBuf::from(home).join(".local").join("bin").join("java"));
+        }
+        out
+    }
+
+    fn do_find_java(&mut self) {
+        let mut seen = HashSet::new();
+        for candidate in Self::discover_java_candidates() {
+            if !candidate.exists() {
+                continue;
+            }
+            let key = candidate.display().to_string();
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if let Some(version) = Self::probe_java_runtime(&candidate) {
+                self.global_settings.java_path = key;
+                save_global_settings(&self.global_settings);
+                self.status = format!("Java found: {version}");
+                return;
+            }
+        }
+
+        self.status =
+            "Java not found automatically. Use 'Обзор' to select java binary.".to_string();
+    }
+
+    fn do_browse_java(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Select Java executable");
+        if let Ok(home) = std::env::var("HOME") {
+            dialog = dialog.set_directory(home);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        let version = Self::probe_java_runtime(&path);
+        self.global_settings.java_path = path.display().to_string();
+        save_global_settings(&self.global_settings);
+        self.status = match version {
+            Some(v) => format!("Java selected: {v}"),
+            None => format!(
+                "Selected path saved, but runtime check failed: {}",
+                self.global_settings.java_path
+            ),
+        };
+    }
+
+    fn do_check_java_settings(&mut self) {
+        let value = self.global_settings.java_path.trim();
+        if value.is_empty() {
+            self.status = "Java path is empty".to_string();
+            return;
+        }
+        let path = PathBuf::from(value);
+        if let Some(version) = Self::probe_java_runtime(&path) {
+            self.status = format!("Java OK: {version}");
+        } else {
+            self.status = format!("Java check failed: {value}");
         }
     }
 
@@ -3117,13 +3213,10 @@ impl PrismarineApp {
                         .changed();
                     ui.horizontal(|ui| {
                         if ui.button("Найти").clicked() {
-                            self.status =
-                                "Автопоиск Java будет добавлен следующим шагом.".to_string();
+                            self.do_find_java();
                         }
                         if ui.button("Обзор").clicked() {
-                            self.status =
-                                "Выбор файла Java через диалог будет добавлен следующим шагом."
-                                    .to_string();
+                            self.do_browse_java();
                         }
                     });
                     changed |= ui
@@ -3133,8 +3226,7 @@ impl PrismarineApp {
                         )
                         .changed();
                     if ui.button("Проверить настройки").clicked() {
-                        self.status =
-                            format!("Проверка Java: {}", self.global_settings.java_path.trim());
+                        self.do_check_java_settings();
                     }
                 });
             }
