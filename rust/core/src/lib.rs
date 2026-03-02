@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
+use zip::ZipArchive;
 
 #[repr(C)]
 pub struct PrismarineTimestampResult {
@@ -470,6 +471,409 @@ pub fn build_java_command(profile: &LaunchProfile) -> (String, Vec<String>) {
     args.push(profile.main_class.clone());
     args.extend(profile.game_args.clone());
     (profile.java_path.clone(), args)
+}
+
+fn mojang_os_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "osx"
+    } else {
+        "linux"
+    }
+}
+
+fn mojang_arch() -> &'static str {
+    if cfg!(target_pointer_width = "64") {
+        "64"
+    } else {
+        "32"
+    }
+}
+
+fn rules_allow_library(lib: &serde_json::Value) -> bool {
+    let Some(rules) = lib.get("rules").and_then(|v| v.as_array()) else {
+        return true;
+    };
+    if rules.is_empty() {
+        return true;
+    }
+
+    let mut allowed = false;
+    for rule in rules {
+        let action = rule
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("disallow");
+        let os_match = rule
+            .get("os")
+            .and_then(|v| v.as_object())
+            .map(|os| {
+                os.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|name| name == mojang_os_name())
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        if !os_match {
+            continue;
+        }
+        allowed = action == "allow";
+    }
+    allowed
+}
+
+fn ensure_url_to_path(
+    client: &Client,
+    url: &str,
+    path: &Path,
+    expected_sha1: Option<&str>,
+) -> Result<(), String> {
+    if path.is_file() {
+        if let Some(sha1) = expected_sha1 {
+            if let Ok(existing) = file_sha1_hex(path)
+                && existing.eq_ignore_ascii_case(sha1)
+            {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("failed to create parent dir: {e}"))?;
+    }
+    let mut response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("download request failed for {url}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("download returned {} for {url}", response.status()));
+    }
+    let mut file = fs::File::create(path).map_err(|e| format!("failed to create file: {e}"))?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut buf)
+            .map_err(|e| format!("failed to read response body: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buf[..read])
+            .map_err(|e| format!("failed to write file {}: {e}", path.display()))?;
+    }
+    file.flush()
+        .map_err(|e| format!("failed to flush {}: {e}", path.display()))?;
+    if let Some(sha1) = expected_sha1 {
+        let existing = file_sha1_hex(path)?;
+        if !existing.eq_ignore_ascii_case(sha1) {
+            return Err(format!("sha1 mismatch for {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn upsert_arg_pair(args: &mut Vec<String>, key: &str, value: &str) {
+    if let Some(pos) = args.iter().position(|x| x == key) {
+        if pos + 1 < args.len() {
+            args[pos + 1] = value.to_string();
+        } else {
+            args.push(value.to_string());
+        }
+    } else {
+        args.push(key.to_string());
+        args.push(value.to_string());
+    }
+}
+
+fn upsert_jvm_property(jvm_args: &mut Vec<String>, key: &str, value: &str) {
+    let prefix = format!("-D{key}=");
+    if let Some(pos) = jvm_args.iter().position(|x| x.starts_with(&prefix)) {
+        jvm_args[pos] = format!("{prefix}{value}");
+    } else {
+        jvm_args.push(format!("{prefix}{value}"));
+    }
+}
+
+fn version_manifest_url() -> &'static str {
+    "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+}
+
+fn load_mojang_version_json(
+    client: &Client,
+    data_root: &Path,
+    version_id: &str,
+) -> Result<serde_json::Value, String> {
+    let manifest = client
+        .get(version_manifest_url())
+        .send()
+        .map_err(|e| format!("failed to fetch version manifest: {e}"))?;
+    if !manifest.status().is_success() {
+        return Err(format!("version manifest returned {}", manifest.status()));
+    }
+    let manifest_json = manifest
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("failed to parse version manifest: {e}"))?;
+    let version_url = manifest_json
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter().find_map(|item| {
+                if item.get("id").and_then(|x| x.as_str()) == Some(version_id) {
+                    item.get("url")
+                        .and_then(|x| x.as_str())
+                        .map(ToString::to_string)
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| format!("version {version_id} not found in Mojang manifest"))?;
+
+    let version_dir = data_root.join("versions").join(version_id);
+    let version_json_path = version_dir.join(format!("{version_id}.json"));
+    ensure_url_to_path(client, &version_url, &version_json_path, None)?;
+    let text = fs::read_to_string(&version_json_path)
+        .map_err(|e| format!("failed to read version json {}: {e}", version_json_path.display()))?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|e| format!("failed to parse version json {}: {e}", version_json_path.display()))
+}
+
+fn merge_parent_child_version(
+    parent: &serde_json::Value,
+    child: &serde_json::Value,
+) -> serde_json::Value {
+    let mut merged = parent.clone();
+    if let Some(obj) = merged.as_object_mut() {
+        for key in [
+            "id",
+            "mainClass",
+            "arguments",
+            "minecraftArguments",
+            "assetIndex",
+            "downloads",
+            "type",
+            "assets",
+        ] {
+            if let Some(v) = child.get(key) {
+                obj.insert(key.to_string(), v.clone());
+            }
+        }
+        let parent_libs = parent
+            .get("libraries")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let child_libs = child
+            .get("libraries")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut libs = parent_libs;
+        libs.extend(child_libs);
+        obj.insert("libraries".to_string(), serde_json::Value::Array(libs));
+    }
+    merged
+}
+
+fn extract_natives_from_jar(jar_path: &Path, natives_dir: &Path) -> Result<(), String> {
+    let file = fs::File::open(jar_path)
+        .map_err(|e| format!("failed to open natives jar {}: {e}", jar_path.display()))?;
+    let mut zip = ZipArchive::new(file)
+        .map_err(|e| format!("failed to read natives jar {}: {e}", jar_path.display()))?;
+    fs::create_dir_all(natives_dir)
+        .map_err(|e| format!("failed to create natives dir {}: {e}", natives_dir.display()))?;
+
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("failed to access zip entry #{i}: {e}"))?;
+        let name = entry.name().to_string();
+        if name.ends_with('/') {
+            continue;
+        }
+        if name.starts_with("META-INF/") {
+            continue;
+        }
+        let target = natives_dir.join(&name);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create native parent dir: {e}"))?;
+        }
+        let mut out = fs::File::create(&target)
+            .map_err(|e| format!("failed to create native file {}: {e}", target.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("failed to extract native file {}: {e}", target.display()))?;
+    }
+
+    Ok(())
+}
+
+pub fn ensure_minecraft_runtime(
+    data_root: &Path,
+    instance_path: &Path,
+    version_id: &str,
+    profile: &mut LaunchProfile,
+) -> Result<(), String> {
+    let version_id = version_id.trim();
+    if version_id.is_empty() {
+        return Err("instance version is empty".to_string());
+    }
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let mut version_json = load_mojang_version_json(&client, data_root, version_id)?;
+    if let Some(parent_id) = version_json
+        .get("inheritsFrom")
+        .and_then(|x| x.as_str())
+        .map(ToString::to_string)
+    {
+        let parent_json = load_mojang_version_json(&client, data_root, &parent_id)?;
+        version_json = merge_parent_child_version(&parent_json, &version_json);
+    }
+
+    let versions_dir = data_root.join("versions").join(version_id);
+    let libraries_dir = data_root.join("libraries");
+    let assets_dir = data_root.join("assets");
+    let game_dir = if instance_path.join("minecraft").is_dir() {
+        instance_path.join("minecraft")
+    } else {
+        instance_path.to_path_buf()
+    };
+    let natives_dir = instance_path.join("natives");
+    fs::create_dir_all(&versions_dir)
+        .map_err(|e| format!("failed to create versions dir {}: {e}", versions_dir.display()))?;
+    fs::create_dir_all(&libraries_dir)
+        .map_err(|e| format!("failed to create libraries dir {}: {e}", libraries_dir.display()))?;
+    fs::create_dir_all(&assets_dir)
+        .map_err(|e| format!("failed to create assets dir {}: {e}", assets_dir.display()))?;
+    fs::create_dir_all(&game_dir)
+        .map_err(|e| format!("failed to create game dir {}: {e}", game_dir.display()))?;
+
+    let client_download = version_json
+        .get("downloads")
+        .and_then(|d| d.get("client"))
+        .ok_or_else(|| format!("version {version_id} has no client download"))?;
+    let client_url = client_download
+        .get("url")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| format!("version {version_id} has no client url"))?;
+    let client_sha1 = client_download.get("sha1").and_then(|x| x.as_str());
+    let client_jar = versions_dir.join(format!("{version_id}.jar"));
+    ensure_url_to_path(&client, client_url, &client_jar, client_sha1)?;
+
+    let asset_index = version_json
+        .get("assetIndex")
+        .ok_or_else(|| format!("version {version_id} has no assetIndex"))?;
+    let asset_id = asset_index
+        .get("id")
+        .and_then(|x| x.as_str())
+        .unwrap_or(version_id);
+    let asset_url = asset_index
+        .get("url")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| format!("version {version_id} assetIndex has no url"))?;
+    let asset_sha1 = asset_index.get("sha1").and_then(|x| x.as_str());
+    let asset_index_path = assets_dir.join("indexes").join(format!("{asset_id}.json"));
+    ensure_url_to_path(&client, asset_url, &asset_index_path, asset_sha1)?;
+
+    let asset_index_text = fs::read_to_string(&asset_index_path)
+        .map_err(|e| format!("failed to read asset index {}: {e}", asset_index_path.display()))?;
+    let asset_index_json = serde_json::from_str::<serde_json::Value>(&asset_index_text)
+        .map_err(|e| format!("failed to parse asset index {}: {e}", asset_index_path.display()))?;
+    if let Some(objects) = asset_index_json.get("objects").and_then(|x| x.as_object()) {
+        for object in objects.values() {
+            let Some(hash) = object.get("hash").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            if hash.len() < 2 {
+                continue;
+            }
+            let target = assets_dir.join("objects").join(&hash[0..2]).join(hash);
+            if target.is_file() {
+                continue;
+            }
+            let obj_url = format!(
+                "https://resources.download.minecraft.net/{}/{}",
+                &hash[0..2],
+                hash
+            );
+            ensure_url_to_path(&client, &obj_url, &target, Some(hash))?;
+        }
+    }
+
+    let mut classpath = Vec::new();
+    if let Some(libraries) = version_json.get("libraries").and_then(|x| x.as_array()) {
+        for lib in libraries {
+            if !rules_allow_library(lib) {
+                continue;
+            }
+            if let Some(artifact) = lib.get("downloads").and_then(|d| d.get("artifact")) {
+                let path = artifact.get("path").and_then(|x| x.as_str()).unwrap_or("");
+                let url = artifact.get("url").and_then(|x| x.as_str()).unwrap_or("");
+                let sha1 = artifact.get("sha1").and_then(|x| x.as_str());
+                if !path.is_empty() && !url.is_empty() {
+                    let lib_path = libraries_dir.join(path);
+                    ensure_url_to_path(&client, url, &lib_path, sha1)?;
+                    classpath.push(lib_path.display().to_string());
+                }
+            }
+
+            let classifier = lib
+                .get("natives")
+                .and_then(|n| n.get(mojang_os_name()))
+                .and_then(|x| x.as_str())
+                .map(|x| x.replace("${arch}", mojang_arch()));
+            if let Some(classifier) = classifier
+                && let Some(native) = lib
+                    .get("downloads")
+                    .and_then(|d| d.get("classifiers"))
+                    .and_then(|c| c.get(&classifier))
+            {
+                let path = native.get("path").and_then(|x| x.as_str()).unwrap_or("");
+                let url = native.get("url").and_then(|x| x.as_str()).unwrap_or("");
+                let sha1 = native.get("sha1").and_then(|x| x.as_str());
+                if !path.is_empty() && !url.is_empty() {
+                    let native_jar = libraries_dir.join(path);
+                    ensure_url_to_path(&client, url, &native_jar, sha1)?;
+                    extract_natives_from_jar(&native_jar, &natives_dir)?;
+                }
+            }
+        }
+    }
+    classpath.push(client_jar.display().to_string());
+
+    profile.classpath = classpath;
+    if let Some(main_class) = version_json.get("mainClass").and_then(|x| x.as_str()) {
+        profile.main_class = main_class.to_string();
+    }
+
+    upsert_arg_pair(&mut profile.game_args, "--version", version_id);
+    upsert_arg_pair(&mut profile.game_args, "--gameDir", &game_dir.display().to_string());
+    upsert_arg_pair(
+        &mut profile.game_args,
+        "--assetsDir",
+        &assets_dir.display().to_string(),
+    );
+    upsert_arg_pair(&mut profile.game_args, "--assetIndex", asset_id);
+    upsert_arg_pair(
+        &mut profile.game_args,
+        "--versionType",
+        version_json
+            .get("type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("release"),
+    );
+    upsert_jvm_property(
+        &mut profile.jvm_args,
+        "java.library.path",
+        &natives_dir.display().to_string(),
+    );
+
+    Ok(())
 }
 
 #[derive(Deserialize)]

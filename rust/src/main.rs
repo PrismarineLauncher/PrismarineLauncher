@@ -6,11 +6,12 @@ use rust_core::{
     complete_microsoft_device_login, copy_instance, create_instance,
     curseforge_get_project_details, curseforge_resolve_primary_file,
     curseforge_search_projects_paged, default_launch_profile, delete_instance,
-    download_file_to_path, download_file_to_path_with_progress, format_s3_time, list_logs,
-    list_mod_files, load_launch_profile, load_prism_instance_config, modrinth_get_project_details,
-    modrinth_resolve_primary_file, modrinth_search_projects_by_type_paged, parse_s3_time,
-    read_log_preview, rename_instance, save_launch_profile, scan_instances,
-    start_microsoft_device_code, sync_modrinth_managed_mods, validate_minecraft_account,
+    download_file_to_path, download_file_to_path_with_progress, ensure_minecraft_runtime,
+    format_s3_time, list_logs, list_mod_files, load_launch_profile, load_prism_instance_config,
+    modrinth_get_project_details, modrinth_resolve_primary_file,
+    modrinth_search_projects_by_type_paged, parse_s3_time, read_log_preview, rename_instance,
+    save_launch_profile, scan_instances, start_microsoft_device_code, sync_modrinth_managed_mods,
+    validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -2253,6 +2254,22 @@ impl PrismarineApp {
         }
         if profile.working_dir.trim().is_empty() {
             profile.working_dir = instance.path.clone();
+        }
+        let instance_version = self.detect_instance_version(&instance_path);
+        let instance_loader = self.detect_instance_loader(&instance_path);
+        let should_prepare_runtime = instance_version != "unknown"
+            && (instance_loader.is_empty() || profile.classpath.is_empty());
+        if should_prepare_runtime {
+            self.status = format!("Preparing Minecraft runtime {}...", instance_version);
+            if let Err(err) = ensure_minecraft_runtime(
+                &self.data_root,
+                &instance_path,
+                &instance_version,
+                &mut profile,
+            ) {
+                self.status = format!("Failed to prepare Minecraft runtime: {err}");
+                return;
+            }
         }
         self.apply_account_launch_args(&mut profile.game_args);
         let (exe, args) = build_java_command(&profile);
