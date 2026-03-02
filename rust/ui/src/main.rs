@@ -1,12 +1,16 @@
 use anyhow::Result;
 use eframe::{App, Frame, NativeOptions, egui};
 use rust_core::{
-    copy_instance, create_instance, delete_instance, format_s3_time, list_logs, list_mod_files,
-    parse_s3_time, read_log_preview, rename_instance, scan_instances,
+    LaunchProfile, build_java_command, copy_instance, create_instance, default_launch_profile,
+    delete_instance, format_s3_time, list_logs, list_mod_files, load_launch_profile, parse_s3_time,
+    read_log_preview, rename_instance, save_launch_profile, scan_instances,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 
 const STATE_FILE: &str = "rust/ui/.state.json";
 
@@ -74,6 +78,9 @@ struct PrismarineApp {
     logs_cache: Vec<(String, String)>,
     selected_log: Option<usize>,
     log_preview: String,
+    launch_profile: LaunchProfile,
+    launch_profile_dirty: bool,
+    processes: HashMap<String, Child>,
 }
 
 impl Default for PrismarineApp {
@@ -109,6 +116,9 @@ impl Default for PrismarineApp {
             logs_cache: Vec::new(),
             selected_log: None,
             log_preview: String::new(),
+            launch_profile: default_launch_profile(Path::new(".")),
+            launch_profile_dirty: false,
+            processes: HashMap::new(),
         };
         app.reload_instances();
         app
@@ -116,10 +126,6 @@ impl Default for PrismarineApp {
 }
 
 impl PrismarineApp {
-    fn selected_instance_mut(&mut self) -> Option<&mut Instance> {
-        self.selected.and_then(|i| self.instances.get_mut(i))
-    }
-
     fn selected_instance(&self) -> Option<&Instance> {
         self.selected.and_then(|i| self.instances.get(i))
     }
@@ -217,6 +223,38 @@ impl PrismarineApp {
                 self.status = format!("Failed to load logs: {err}");
             }
         }
+
+        match load_launch_profile(&path) {
+            Ok(profile) => {
+                self.launch_profile = profile;
+                self.launch_profile_dirty = false;
+            }
+            Err(err) => {
+                self.launch_profile = default_launch_profile(&path);
+                self.launch_profile_dirty = false;
+                self.status = format!("Failed to load launch profile: {err}");
+            }
+        }
+    }
+
+    fn sync_process_states(&mut self) {
+        let keys: Vec<String> = self.processes.keys().cloned().collect();
+        let mut finished = Vec::new();
+        for key in keys {
+            if let Some(child) = self.processes.get_mut(&key) {
+                match child.try_wait() {
+                    Ok(Some(_)) => finished.push(key),
+                    Ok(None) => {}
+                    Err(_) => finished.push(key),
+                }
+            }
+        }
+        for key in finished {
+            self.processes.remove(&key);
+        }
+        for instance in &mut self.instances {
+            instance.running = self.processes.contains_key(&instance.path);
+        }
     }
 
     fn do_create_instance(&mut self) {
@@ -296,6 +334,10 @@ impl PrismarineApp {
             return;
         };
 
+        if self.processes.contains_key(&instance.path) {
+            self.do_kill_instance();
+        }
+
         match delete_instance(Path::new(&instance.path)) {
             Ok(_) => {
                 self.status = format!("Deleted {}", instance.name);
@@ -304,6 +346,110 @@ impl PrismarineApp {
             }
             Err(err) => {
                 self.status = format!("Failed to delete {}: {err}", instance.name);
+            }
+        }
+    }
+
+    fn do_launch_instance(&mut self) {
+        let Some(instance) = self.selected_instance().cloned() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        if self.processes.contains_key(&instance.path) {
+            self.status = format!("{} is already running", instance.name);
+            return;
+        }
+
+        let instance_path = PathBuf::from(&instance.path);
+        let mut profile = self.launch_profile.clone();
+        if profile.working_dir.trim().is_empty() {
+            profile.working_dir = instance.path.clone();
+        }
+        let (exe, args) = build_java_command(&profile);
+
+        let logs_dir = instance_path.join("logs");
+        let _ = fs::create_dir_all(&logs_dir);
+        let log_path = logs_dir.join("latest.log");
+        let mut log_file = match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                self.status = format!("Failed to open log file: {err}");
+                return;
+            }
+        };
+        let _ = writeln!(log_file, "=== launch: {} {} ===", exe, args.join(" "));
+        let stdout_log = match log_file.try_clone() {
+            Ok(f) => f,
+            Err(err) => {
+                self.status = format!("Failed to clone log handle: {err}");
+                return;
+            }
+        };
+        let stderr_log = match log_file.try_clone() {
+            Ok(f) => f,
+            Err(err) => {
+                self.status = format!("Failed to clone log handle: {err}");
+                return;
+            }
+        };
+
+        let working_dir = PathBuf::from(&profile.working_dir);
+        let mut cmd = Command::new(exe);
+        cmd.args(args)
+            .current_dir(working_dir)
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log));
+
+        match cmd.spawn() {
+            Ok(child) => {
+                self.processes.insert(instance.path.clone(), child);
+                self.status = format!("Launched {}", instance.name);
+                self.sync_process_states();
+            }
+            Err(err) => {
+                self.status = format!("Failed to launch {}: {}", instance.name, err);
+            }
+        }
+    }
+
+    fn do_kill_instance(&mut self) {
+        let Some(instance) = self.selected_instance().cloned() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+
+        if let Some(mut child) = self.processes.remove(&instance.path) {
+            match child.kill() {
+                Ok(_) => {
+                    let _ = child.wait();
+                    self.status = format!("Stopped {}", instance.name);
+                }
+                Err(err) => {
+                    self.status = format!("Failed to stop {}: {}", instance.name, err);
+                }
+            }
+        } else {
+            self.status = format!("{} is not running", instance.name);
+        }
+        self.sync_process_states();
+    }
+
+    fn save_current_launch_profile(&mut self) {
+        let Some(path) = self.selected_instance_path() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        match save_launch_profile(&path, &self.launch_profile) {
+            Ok(_) => {
+                self.launch_profile_dirty = false;
+                self.status = "Launch profile saved".to_string();
+            }
+            Err(err) => {
+                self.status = format!("Failed to save launch profile: {err}");
             }
         }
     }
@@ -366,17 +512,11 @@ impl PrismarineApp {
                     ui.close();
                 }
                 if ui.button("Launch").clicked() {
-                    if let Some(instance) = self.selected_instance_mut() {
-                        instance.running = true;
-                        self.status = format!("Launched {}", instance.name);
-                    }
+                    self.do_launch_instance();
                     ui.close();
                 }
                 if ui.button("Kill").clicked() {
-                    if let Some(instance) = self.selected_instance_mut() {
-                        instance.running = false;
-                        self.status = format!("Stopped {}", instance.name);
-                    }
+                    self.do_kill_instance();
                     ui.close();
                 }
             });
@@ -561,11 +701,76 @@ impl PrismarineApp {
             return;
         };
 
-        ui.label("Instance Settings (migration placeholder)");
+        ui.label("Instance Launch Settings");
         ui.separator();
         ui.label(format!("Name: {}", instance.name));
         ui.label(format!("Path: {}", instance.path));
-        ui.label("These controls will replace Qt instance settings pages one by one.");
+        ui.separator();
+
+        ui.label("Java executable:");
+        if ui
+            .text_edit_singleline(&mut self.launch_profile.java_path)
+            .changed()
+        {
+            self.launch_profile_dirty = true;
+        }
+        ui.label("Main class:");
+        if ui
+            .text_edit_singleline(&mut self.launch_profile.main_class)
+            .changed()
+        {
+            self.launch_profile_dirty = true;
+        }
+        ui.label("Working directory:");
+        if ui
+            .text_edit_singleline(&mut self.launch_profile.working_dir)
+            .changed()
+        {
+            self.launch_profile_dirty = true;
+        }
+
+        ui.separator();
+        ui.label("JVM args (one per line):");
+        let mut jvm_args_text = self.launch_profile.jvm_args.join("\n");
+        if ui
+            .add(egui::TextEdit::multiline(&mut jvm_args_text).desired_rows(4))
+            .changed()
+        {
+            self.launch_profile.jvm_args = jvm_args_text
+                .lines()
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            self.launch_profile_dirty = true;
+        }
+
+        ui.label("Game args (one per line):");
+        let mut game_args_text = self.launch_profile.game_args.join("\n");
+        if ui
+            .add(egui::TextEdit::multiline(&mut game_args_text).desired_rows(5))
+            .changed()
+        {
+            self.launch_profile.game_args = game_args_text
+                .lines()
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(ToString::to_string)
+                .collect();
+            self.launch_profile_dirty = true;
+        }
+
+        ui.horizontal(|ui| {
+            if ui.button("Save Launch Profile").clicked() {
+                self.save_current_launch_profile();
+            }
+            if ui.button("Reload Launch Profile").clicked() {
+                self.refresh_selected_content();
+            }
+            if self.launch_profile_dirty {
+                ui.colored_label(egui::Color32::YELLOW, "Unsaved changes");
+            }
+        });
     }
 
     fn draw_dialogs(&mut self, ctx: &egui::Context) {
@@ -648,6 +853,8 @@ impl PrismarineApp {
 
 impl App for PrismarineApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+        self.sync_process_states();
+
         if self.last_selected != self.selected {
             self.last_selected = self.selected;
             self.refresh_selected_content();
@@ -702,18 +909,14 @@ impl App for PrismarineApp {
                 if ui
                     .add_enabled(has_selected, egui::Button::new("Launch"))
                     .clicked()
-                    && let Some(instance) = self.selected_instance_mut()
                 {
-                    instance.running = true;
-                    self.status = format!("Launched {}", instance.name);
+                    self.do_launch_instance();
                 }
                 if ui
                     .add_enabled(has_selected, egui::Button::new("Kill"))
                     .clicked()
-                    && let Some(instance) = self.selected_instance_mut()
                 {
-                    instance.running = false;
-                    self.status = format!("Stopped {}", instance.name);
+                    self.do_kill_instance();
                 }
                 ui.separator();
                 if ui

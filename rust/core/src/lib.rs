@@ -1,4 +1,5 @@
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, c_char};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,32 @@ pub struct InstanceSummary {
 pub struct LogSummary {
     pub file_name: String,
     pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LaunchProfile {
+    pub java_path: String,
+    pub jvm_args: Vec<String>,
+    pub main_class: String,
+    pub classpath: Vec<String>,
+    pub game_args: Vec<String>,
+    pub working_dir: String,
+}
+
+pub fn default_launch_profile(instance_path: &Path) -> LaunchProfile {
+    LaunchProfile {
+        java_path: "java".to_string(),
+        jvm_args: vec!["-Xms1G".to_string(), "-Xmx2G".to_string()],
+        main_class: "net.minecraft.client.main.Main".to_string(),
+        classpath: Vec::new(),
+        game_args: vec![
+            "--gameDir".to_string(),
+            instance_path.display().to_string(),
+            "--version".to_string(),
+            "Prismarine".to_string(),
+        ],
+        working_dir: instance_path.display().to_string(),
+    }
 }
 
 pub fn parse_s3_time(input: &str) -> Option<(i64, i32)> {
@@ -232,6 +259,50 @@ pub fn read_log_preview(path: &Path, max_chars: usize) -> std::io::Result<String
     Ok(text.chars().take(max_chars).collect())
 }
 
+pub fn launch_profile_path(instance_path: &Path) -> PathBuf {
+    instance_path.join("launch_profile.json")
+}
+
+pub fn load_launch_profile(instance_path: &Path) -> std::io::Result<LaunchProfile> {
+    let profile_path = launch_profile_path(instance_path);
+    if !profile_path.exists() {
+        return Ok(default_launch_profile(instance_path));
+    }
+    let text = fs::read_to_string(profile_path)?;
+    let parsed = serde_json::from_str::<LaunchProfile>(&text).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to parse launch profile: {err}"),
+        )
+    })?;
+    Ok(parsed)
+}
+
+pub fn save_launch_profile(instance_path: &Path, profile: &LaunchProfile) -> std::io::Result<()> {
+    fs::create_dir_all(instance_path)?;
+    let text = serde_json::to_string_pretty(profile).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to serialize launch profile: {err}"),
+        )
+    })?;
+    fs::write(launch_profile_path(instance_path), text)?;
+    Ok(())
+}
+
+pub fn build_java_command(profile: &LaunchProfile) -> (String, Vec<String>) {
+    let mut args = Vec::new();
+    args.extend(profile.jvm_args.clone());
+    if !profile.classpath.is_empty() {
+        let classpath_sep = if cfg!(windows) { ";" } else { ":" };
+        args.push("-cp".to_string());
+        args.push(profile.classpath.join(classpath_sep));
+    }
+    args.push(profile.main_class.clone());
+    args.extend(profile.game_args.clone());
+    (profile.java_path.clone(), args)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn prismarine_parse_s3_time(
     input: *const c_char,
@@ -288,8 +359,9 @@ pub extern "C" fn prismarine_format_s3_time(
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_instance, create_instance, delete_instance, format_s3_time, list_logs, list_mod_files,
-        parse_s3_time, read_log_preview, rename_instance, scan_instances,
+        build_java_command, copy_instance, create_instance, default_launch_profile,
+        delete_instance, format_s3_time, list_logs, list_mod_files, load_launch_profile,
+        parse_s3_time, read_log_preview, rename_instance, save_launch_profile, scan_instances,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -375,6 +447,39 @@ mod tests {
         delete_instance(&renamed).expect("delete renamed");
         let remaining = scan_instances(&root).expect("scan remaining");
         assert!(remaining.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn launch_profile_roundtrip_and_command_builder_work() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = PathBuf::from(format!(
+            "/tmp/prismarine_launcher_launch_test_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create root");
+
+        let mut profile = default_launch_profile(&root);
+        profile.java_path = "java".to_string();
+        profile.main_class = "com.example.Main".to_string();
+        profile.jvm_args = vec!["-Xmx1G".to_string()];
+        profile.classpath = vec!["a.jar".to_string(), "b.jar".to_string()];
+        profile.game_args = vec!["--demo".to_string()];
+        save_launch_profile(&root, &profile).expect("save profile");
+
+        let loaded = load_launch_profile(&root).expect("load profile");
+        assert_eq!(loaded.main_class, "com.example.Main");
+
+        let (_exe, args) = build_java_command(&loaded);
+        assert!(args.iter().any(|x| x == "-cp"));
+        assert!(args.iter().any(|x| x == "com.example.Main"));
+        assert!(args.iter().any(|x| x == "--demo"));
 
         let _ = fs::remove_dir_all(&root);
     }
