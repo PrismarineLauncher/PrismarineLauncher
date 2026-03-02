@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 eframe = { version = "0.33", default-features = true }
 egui = "0.33"
 egui_commonmark = "0.22"

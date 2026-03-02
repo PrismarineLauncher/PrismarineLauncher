@@ -161,6 +161,12 @@ struct Instance {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct ModListEntry {
     name: String,
+    file_path: String,
+    enabled: bool,
+    display_name: String,
+    version: String,
+    updated_at: String,
+    provider: String,
     icon_path: Option<String>,
 }
 
@@ -335,6 +341,7 @@ struct PrismarineApp {
     settings_subtab: SettingsSubTab,
     icon_cache: HashMap<String, egui::TextureHandle>,
     post_exit_commands: HashMap<String, String>,
+    modrinth_project_brief_cache: HashMap<String, (String, Option<String>)>,
 }
 
 impl Default for PrismarineApp {
@@ -412,6 +419,7 @@ impl Default for PrismarineApp {
             settings_subtab: SettingsSubTab::General,
             icon_cache: HashMap::new(),
             post_exit_commands: HashMap::new(),
+            modrinth_project_brief_cache: HashMap::new(),
         };
         app.reload_instances();
         app
@@ -1097,13 +1105,7 @@ impl PrismarineApp {
     }
 
     fn resolve_mod_icon_path(&self, instance_path: &Path, mod_file_name: &str) -> Option<String> {
-        let mod_path = instance_path.join("mods").join(mod_file_name);
-        let mod_path_alt = instance_path.join(".minecraft/mods").join(mod_file_name);
-        let mod_file = if mod_path.is_file() {
-            mod_path
-        } else {
-            mod_path_alt
-        };
+        let mod_file = resolve_mod_file_path(instance_path, mod_file_name)?;
         if !mod_file.is_file() {
             return None;
         }
@@ -1127,6 +1129,92 @@ impl PrismarineApp {
             }
         }
         None
+    }
+
+    fn read_modrinth_managed_metadata(
+        &mut self,
+        instance_path: &Path,
+    ) -> HashMap<String, (String, Option<String>)> {
+        let mut out = HashMap::new();
+        let index_path = instance_path.join("mrpack").join("modrinth.index.json");
+        let Ok(text) = fs::read_to_string(index_path) else {
+            return out;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return out;
+        };
+        let Some(files) = json.get("files").and_then(|x| x.as_array()) else {
+            return out;
+        };
+        for file in files {
+            let Some(path) = file.get("path").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            if !path.starts_with("mods/") {
+                continue;
+            }
+            let Some(file_name) = Path::new(path)
+                .file_name()
+                .and_then(|x| x.to_str())
+                .map(|x| x.to_string())
+            else {
+                continue;
+            };
+            let project_id = file
+                .get("downloads")
+                .and_then(|x| x.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|x| x.as_str())
+                .and_then(extract_modrinth_project_id_from_download_url)
+                .unwrap_or_default();
+            if project_id.is_empty() {
+                continue;
+            }
+            if !self.modrinth_project_brief_cache.contains_key(&project_id)
+                && let Ok(details) = modrinth_get_project_details(&project_id)
+            {
+                self.modrinth_project_brief_cache.insert(
+                    project_id.clone(),
+                    (details.title.clone(), details.icon_url.clone()),
+                );
+            }
+            if let Some(cached) = self.modrinth_project_brief_cache.get(&project_id) {
+                out.insert(file_name, cached.clone());
+            }
+        }
+        out
+    }
+
+    fn do_toggle_mod_enabled(&mut self, file_path: &str, enable: bool) {
+        let from = PathBuf::from(file_path);
+        let Some(name) = from.file_name().and_then(|x| x.to_str()) else {
+            self.status = "Invalid mod file name".to_string();
+            return;
+        };
+        let to_name = if enable {
+            name.strip_suffix(".disabled").unwrap_or(name).to_string()
+        } else if name.ends_with(".disabled") {
+            name.to_string()
+        } else {
+            format!("{name}.disabled")
+        };
+        if to_name == name {
+            return;
+        }
+        let Some(parent) = from.parent() else {
+            self.status = "Invalid mod file path".to_string();
+            return;
+        };
+        let to = parent.join(to_name);
+        match fs::rename(&from, &to) {
+            Ok(_) => {
+                self.status = format!("Updated mod state: {}", to.display());
+                self.refresh_selected_content();
+            }
+            Err(err) => {
+                self.status = format!("Failed to update mod state: {err}");
+            }
+        }
     }
 
     fn reload_instances(&mut self) {
@@ -1182,13 +1270,59 @@ impl PrismarineApp {
 
         match list_mod_files(&path) {
             Ok(mods) => {
+                let managed = self.read_modrinth_managed_metadata(&path);
                 self.mods_cache = mods
                     .into_iter()
-                    .map(|name| ModListEntry {
-                        icon_path: self.resolve_mod_icon_path(&path, &name),
-                        name,
+                    .map(|name| {
+                        let file_path = resolve_mod_file_path(&path, &name)
+                            .map(|x| x.display().to_string())
+                            .unwrap_or_else(|| {
+                                path.join("minecraft/mods")
+                                    .join(&name)
+                                    .display()
+                                    .to_string()
+                            });
+                        let enabled = !name.ends_with(".disabled");
+                        let clean_name =
+                            name.strip_suffix(".disabled").unwrap_or(&name).to_string();
+                        let (display_name, icon_path, provider) =
+                            if let Some((title, icon)) = managed.get(&clean_name) {
+                                (
+                                    title.clone(),
+                                    icon.clone()
+                                        .or_else(|| self.resolve_mod_icon_path(&path, &name)),
+                                    "Modrinth".to_string(),
+                                )
+                            } else {
+                                (
+                                    prettify_mod_name(&clean_name),
+                                    self.resolve_mod_icon_path(&path, &name),
+                                    "Local".to_string(),
+                                )
+                            };
+                        let version = extract_version_from_mod_filename(&clean_name);
+                        let updated_at = fs::metadata(&file_path)
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .map(format_system_time_ddmmyyyy)
+                            .unwrap_or_default();
+                        ModListEntry {
+                            name: clean_name,
+                            file_path,
+                            enabled,
+                            display_name,
+                            version,
+                            updated_at,
+                            provider,
+                            icon_path,
+                        }
                     })
                     .collect();
+                self.mods_cache.sort_by(|a, b| {
+                    a.display_name
+                        .to_lowercase()
+                        .cmp(&b.display_name.to_lowercase())
+                });
             }
             Err(err) => {
                 self.status = format!("Failed to load mods: {err}");
@@ -1942,10 +2076,30 @@ impl PrismarineApp {
                 if mods.is_empty() {
                     ui.label("No mods found");
                 } else {
+                    ui.horizontal(|ui| {
+                        ui.label("Enable");
+                        ui.add_space(10.0);
+                        ui.label("Image");
+                        ui.add_space(16.0);
+                        ui.label("Name");
+                        ui.add_space(220.0);
+                        ui.label("Version");
+                        ui.add_space(50.0);
+                        ui.label("Updated");
+                        ui.add_space(30.0);
+                        ui.label("Provider");
+                    });
+                    ui.separator();
                     for item in &mods {
                         ui.horizontal(|ui| {
+                            let mut enabled = item.enabled;
+                            if ui.checkbox(&mut enabled, "").changed() {
+                                self.do_toggle_mod_enabled(&item.file_path, enabled);
+                            }
                             if let Some(icon_path) = &item.icon_path {
-                                if let Some(tex) = self.ensure_icon_texture(ui.ctx(), icon_path) {
+                                if let Some(tex) =
+                                    self.ensure_icon_texture_from_source(ui.ctx(), icon_path)
+                                {
                                     ui.image((tex.id(), egui::vec2(row_height, row_height)));
                                 } else {
                                     ui.add_space(row_height);
@@ -1953,8 +2107,15 @@ impl PrismarineApp {
                             } else {
                                 ui.add_space(row_height);
                             }
-                            ui.monospace(&item.name);
+                            ui.label(&item.display_name);
+                            ui.add_space(20.0);
+                            ui.monospace(&item.version);
+                            ui.add_space(20.0);
+                            ui.monospace(&item.updated_at);
+                            ui.add_space(20.0);
+                            ui.label(&item.provider);
                         });
+                        ui.separator();
                     }
                 }
             });
@@ -2717,6 +2878,63 @@ fn preferred_mods_dir(instance_path: &Path) -> PathBuf {
     let fallback = instance_path.join("minecraft/mods");
     let _ = fs::create_dir_all(&fallback);
     fallback
+}
+
+fn resolve_mod_file_path(instance_path: &Path, mod_file_name: &str) -> Option<PathBuf> {
+    for candidate in [
+        instance_path.join("minecraft/mods").join(mod_file_name),
+        instance_path.join(".minecraft/mods").join(mod_file_name),
+        instance_path.join("mods").join(mod_file_name),
+    ] {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn extract_modrinth_project_id_from_download_url(url: &str) -> Option<String> {
+    let marker = "/data/";
+    let idx = url.find(marker)?;
+    let tail = &url[idx + marker.len()..];
+    let id = tail.split('/').next()?.trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+fn extract_version_from_mod_filename(file_name: &str) -> String {
+    let stem = file_name
+        .strip_suffix(".jar")
+        .or_else(|| file_name.strip_suffix(".zip"))
+        .unwrap_or(file_name);
+    if let Some(idx) = stem.rfind('-') {
+        let ver = stem[idx + 1..].trim();
+        if !ver.is_empty() {
+            return ver.to_string();
+        }
+    }
+    String::new()
+}
+
+fn prettify_mod_name(file_name: &str) -> String {
+    let stem = file_name
+        .strip_suffix(".jar")
+        .or_else(|| file_name.strip_suffix(".zip"))
+        .unwrap_or(file_name);
+    stem.split('-')
+        .next()
+        .unwrap_or(stem)
+        .replace('_', " ")
+        .trim()
+        .to_string()
+}
+
+fn format_system_time_ddmmyyyy(time: std::time::SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Local> = time.into();
+    dt.format("%d.%m.%Y").to_string()
 }
 
 fn preferred_resourcepacks_dir(instance_path: &Path) -> PathBuf {
