@@ -1878,61 +1878,68 @@ impl PrismarineApp {
             egui::Window::new("Add Licensed Account")
                 .collapsible(false)
                 .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .default_width(540.0)
                 .show(ctx, |ui| {
-                    ui.label("Microsoft login (recommended):");
-                    ui.horizontal(|ui| {
-                        let login_running = self.device_login_receiver.is_some();
-                        if ui
-                            .add_enabled(
-                                !login_running,
-                                egui::Button::new("Login via Browser + Code/QR"),
-                            )
-                            .clicked()
-                        {
-                            self.do_start_device_code_login();
-                        }
-                        if let Some(device) = &self.device_login_info {
-                            let open_url = device
-                                .verification_uri_complete
-                                .clone()
-                                .unwrap_or_else(|| device.verification_uri.clone());
-                            if ui.button("Open Microsoft Page").clicked() {
-                                let _ = Command::new("sh")
-                                    .arg("-lc")
-                                    .arg(format!("xdg-open {}", shell_escape(&open_url)))
-                                    .status();
+                    ui.vertical_centered(|ui| {
+                        ui.label("Microsoft login (recommended):");
+                        ui.horizontal(|ui| {
+                            let login_running = self.device_login_receiver.is_some();
+                            if ui
+                                .add_enabled(
+                                    !login_running,
+                                    egui::Button::new("Login via Browser + Code/QR"),
+                                )
+                                .clicked()
+                            {
+                                self.do_start_device_code_login();
+                            }
+                            if let Some(device) = &self.device_login_info {
+                                let open_url = device
+                                    .verification_uri_complete
+                                    .clone()
+                                    .unwrap_or_else(|| device.verification_uri.clone());
+                                if ui.button("Open Microsoft Page").clicked() {
+                                    let _ = Command::new("sh")
+                                        .arg("-lc")
+                                        .arg(format!("xdg-open {}", shell_escape(&open_url)))
+                                        .status();
+                                }
+                            }
+                        });
+                        if let Some(device) = self.device_login_info.clone() {
+                            ui.separator();
+                            ui.label(format!("Code: {}", device.user_code));
+                            ui.label(format!("URL: {}", device.verification_uri));
+                            let qr_payload = self.device_login_qr_payload.clone();
+                            if let Some(tex) = self.ensure_qr_texture(ui.ctx(), &qr_payload) {
+                                ui.image((tex.id(), egui::vec2(192.0, 192.0)));
+                            }
+                            if !self.device_login_status.is_empty() {
+                                ui.label(&self.device_login_status);
                             }
                         }
-                    });
-                    if let Some(device) = self.device_login_info.clone() {
                         ui.separator();
-                        ui.label(format!("Code: {}", device.user_code));
-                        ui.label(format!("URL: {}", device.verification_uri));
-                        let qr_payload = self.device_login_qr_payload.clone();
-                        if let Some(tex) = self.ensure_qr_texture(ui.ctx(), &qr_payload) {
-                            ui.image((tex.id(), egui::vec2(192.0, 192.0)));
-                        }
-                        if !self.device_login_status.is_empty() {
-                            ui.label(&self.device_login_status);
-                        }
-                    }
-                    ui.separator();
-                    ui.label("Manual token fallback:");
+                        ui.label("Manual token fallback:");
+                    });
+
                     ui.label("Display name:");
                     ui.text_edit_singleline(&mut self.new_account_name);
                     ui.label("Access token (Minecraft Services):");
                     ui.add(egui::TextEdit::singleline(&mut self.new_account_token).password(true));
-                    ui.horizontal(|ui| {
-                        if ui.button("Validate + Add").clicked() {
-                            self.do_add_licensed_account();
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.show_add_account_dialog = false;
-                            self.device_login_receiver = None;
-                            self.device_login_info = None;
-                            self.device_login_status.clear();
-                            self.device_login_qr_payload.clear();
-                        }
+                    ui.vertical_centered(|ui| {
+                        ui.horizontal(|ui| {
+                            if ui.button("Validate + Add").clicked() {
+                                self.do_add_licensed_account();
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.show_add_account_dialog = false;
+                                self.device_login_receiver = None;
+                                self.device_login_info = None;
+                                self.device_login_status.clear();
+                                self.device_login_qr_payload.clear();
+                            }
+                        });
                     });
                 });
         }
