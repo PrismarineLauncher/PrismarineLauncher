@@ -65,6 +65,7 @@ pub struct ModrinthSearchHit {
     pub title: String,
     pub project_id: String,
     pub slug: String,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -461,6 +462,7 @@ struct ModrinthSearchHitResponse {
     title: String,
     project_id: String,
     slug: String,
+    description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -510,6 +512,7 @@ pub fn modrinth_search_projects(
             title: x.title,
             project_id: x.project_id,
             slug: x.slug,
+            description: x.description.unwrap_or_default(),
         })
         .collect())
 }

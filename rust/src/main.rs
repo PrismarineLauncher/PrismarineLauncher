@@ -19,7 +19,6 @@ enum CenterTab {
     Overview,
     Mods,
     Logs,
-    Modrinth,
     Settings,
 }
 
@@ -65,6 +64,18 @@ enum AccountType {
 impl Default for AccountType {
     fn default() -> Self {
         Self::Offline
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+enum DownloadProvider {
+    Modrinth,
+    CurseForge,
+}
+
+impl Default for DownloadProvider {
+    fn default() -> Self {
+        Self::Modrinth
     }
 }
 
@@ -214,11 +225,16 @@ struct PrismarineApp {
     show_add_account_dialog: bool,
     new_account_name: String,
     new_account_token: String,
+    show_download_panel: bool,
+    download_provider: DownloadProvider,
     modrinth_query: String,
     modrinth_loader: String,
     modrinth_game_version: String,
     modrinth_hits: Vec<ModrinthSearchHit>,
     selected_modrinth_hit: Option<usize>,
+    curseforge_query: String,
+    curseforge_download_url: String,
+    curseforge_filename: String,
     global_settings: GlobalLaunchSettings,
     settings_subtab: SettingsSubTab,
     icon_cache: HashMap<String, egui::TextureHandle>,
@@ -275,11 +291,16 @@ impl Default for PrismarineApp {
             show_add_account_dialog: false,
             new_account_name: String::new(),
             new_account_token: String::new(),
+            show_download_panel: false,
+            download_provider: DownloadProvider::Modrinth,
             modrinth_query: String::new(),
-            modrinth_loader: "fabric".to_string(),
+            modrinth_loader: String::new(),
             modrinth_game_version: String::new(),
             modrinth_hits: Vec::new(),
             selected_modrinth_hit: None,
+            curseforge_query: String::new(),
+            curseforge_download_url: String::new(),
+            curseforge_filename: String::new(),
             global_settings: load_global_settings(),
             settings_subtab: SettingsSubTab::General,
             icon_cache: HashMap::new(),
@@ -406,6 +427,61 @@ impl PrismarineApp {
         }
     }
 
+    fn open_curseforge_search(&mut self) {
+        let mut url =
+            "https://www.curseforge.com/minecraft/search?class=mc-mods&search=".to_string();
+        url.push_str(&percent_encode_query(self.curseforge_query.trim()));
+        if !self.modrinth_game_version.trim().is_empty() {
+            url.push_str("&gameVersion=");
+            url.push_str(&percent_encode_query(self.modrinth_game_version.trim()));
+        }
+        let result = Command::new("sh")
+            .arg("-lc")
+            .arg(format!("xdg-open {}", shell_escape(&url)))
+            .status();
+        match result {
+            Ok(_) => {
+                self.status = "Opened CurseForge search in browser".to_string();
+            }
+            Err(err) => {
+                self.status = format!("Failed to open browser: {err}");
+            }
+        }
+    }
+
+    fn do_curseforge_download_url(&mut self) {
+        let url = self.curseforge_download_url.trim().to_string();
+        if url.is_empty() {
+            self.status = "CurseForge URL is empty".to_string();
+            return;
+        }
+        let Some(instance_path) = self.selected_instance_path() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+
+        let file_name = if self.curseforge_filename.trim().is_empty() {
+            url.rsplit('/')
+                .next()
+                .map(|x| x.split('?').next().unwrap_or(x))
+                .filter(|x| !x.trim().is_empty())
+                .unwrap_or("downloaded-mod.jar")
+                .to_string()
+        } else {
+            self.curseforge_filename.trim().to_string()
+        };
+        let target = instance_path.join("mods").join(&file_name);
+        match download_file_to_path(&url, &target) {
+            Ok(_) => {
+                self.status = format!("Downloaded {} -> {}", file_name, target.display());
+                self.refresh_selected_content();
+            }
+            Err(err) => {
+                self.status = format!("Failed to download CurseForge file: {err}");
+            }
+        }
+    }
+
     fn do_modrinth_download_selected(&mut self) {
         let Some(hit_idx) = self.selected_modrinth_hit else {
             self.status = "No Modrinth project selected".to_string();
@@ -420,12 +496,10 @@ impl PrismarineApp {
             return;
         };
         let hit = self.modrinth_hits[hit_idx].clone();
+        let version = self.modrinth_game_version.trim();
+        let loader = self.modrinth_loader.trim();
 
-        match modrinth_resolve_primary_file(
-            &hit.project_id,
-            self.modrinth_game_version.trim(),
-            self.modrinth_loader.trim(),
-        ) {
+        match modrinth_resolve_primary_file(&hit.project_id, version, loader) {
             Ok(file) => {
                 let target = instance_path.join("mods").join(&file.filename);
                 match download_file_to_path(&file.url, &target) {
@@ -497,6 +571,31 @@ impl PrismarineApp {
         }
 
         "unknown".to_string()
+    }
+
+    fn detect_instance_loader(&self, instance_path: &Path) -> String {
+        let mmc_pack = instance_path.join("mmc-pack.json");
+        if let Ok(text) = fs::read_to_string(mmc_pack)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(components) = json.get("components").and_then(|v| v.as_array())
+        {
+            for component in components {
+                let uid = component.get("uid").and_then(|v| v.as_str()).unwrap_or("");
+                if uid == "net.fabricmc.fabric-loader" {
+                    return "fabric".to_string();
+                }
+                if uid == "org.quiltmc.quilt-loader" {
+                    return "quilt".to_string();
+                }
+                if uid == "net.minecraftforge" {
+                    return "forge".to_string();
+                }
+                if uid.contains("neoforge") || uid == "net.neoforged" {
+                    return "neoforge".to_string();
+                }
+            }
+        }
+        String::new()
     }
 
     fn resolve_instance_icon_path(&self, instance_path: &Path) -> Option<String> {
@@ -608,6 +707,8 @@ impl PrismarineApp {
         self.log_preview.clear();
 
         let Some(path) = self.selected_instance_path() else {
+            self.modrinth_loader.clear();
+            self.modrinth_game_version.clear();
             return;
         };
 
@@ -647,6 +748,14 @@ impl PrismarineApp {
                 self.status = format!("Failed to load launch profile: {err}");
             }
         }
+
+        let detected_version = self.detect_instance_version(&path);
+        self.modrinth_game_version = if detected_version == "unknown" {
+            String::new()
+        } else {
+            detected_version
+        };
+        self.modrinth_loader = self.detect_instance_loader(&path);
     }
 
     fn sync_process_states(&mut self) {
@@ -1176,7 +1285,6 @@ impl PrismarineApp {
             ui.selectable_value(&mut self.active_tab, CenterTab::Overview, "Overview");
             ui.selectable_value(&mut self.active_tab, CenterTab::Mods, "Mods");
             ui.selectable_value(&mut self.active_tab, CenterTab::Logs, "Logs");
-            ui.selectable_value(&mut self.active_tab, CenterTab::Modrinth, "Modrinth");
             ui.selectable_value(&mut self.active_tab, CenterTab::Settings, "Settings");
         });
         ui.separator();
@@ -1213,31 +1321,135 @@ impl PrismarineApp {
             if ui.button("Refresh Mods").clicked() {
                 self.refresh_selected_content();
             }
+            if ui.button("Download Mods").clicked() {
+                self.show_download_panel = !self.show_download_panel;
+            }
             ui.label(format!("Total: {}", self.mods_cache.len()));
         });
         ui.separator();
 
-        if self.mods_cache.is_empty() {
-            ui.label("No mods found");
+        let mods = self.mods_cache.clone();
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .show(ui, |ui| {
+                let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(18.0);
+                if mods.is_empty() {
+                    ui.label("No mods found");
+                } else {
+                    for item in &mods {
+                        ui.horizontal(|ui| {
+                            if let Some(icon_path) = &item.icon_path {
+                                if let Some(tex) = self.ensure_icon_texture(ui.ctx(), icon_path) {
+                                    ui.image((tex.id(), egui::vec2(row_height, row_height)));
+                                } else {
+                                    ui.add_space(row_height);
+                                }
+                            } else {
+                                ui.add_space(row_height);
+                            }
+                            ui.monospace(&item.name);
+                        });
+                    }
+                }
+            });
+
+        if !self.show_download_panel {
             return;
         }
 
-        let mods = self.mods_cache.clone();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(18.0);
-            for item in &mods {
-                ui.horizontal(|ui| {
-                    if let Some(icon_path) = &item.icon_path {
-                        if let Some(tex) = self.ensure_icon_texture(ui.ctx(), icon_path) {
-                            ui.image((tex.id(), egui::vec2(row_height, row_height)));
-                        } else {
-                            ui.add_space(row_height);
+        ui.separator();
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Скачивание модов");
+                ui.selectable_value(
+                    &mut self.download_provider,
+                    DownloadProvider::Modrinth,
+                    "Modrinth",
+                );
+                ui.selectable_value(
+                    &mut self.download_provider,
+                    DownloadProvider::CurseForge,
+                    "CurseForge",
+                );
+            });
+            ui.label(format!(
+                "Автоопределено: loader={} | version={}",
+                if self.modrinth_loader.is_empty() {
+                    "unknown"
+                } else {
+                    &self.modrinth_loader
+                },
+                if self.modrinth_game_version.is_empty() {
+                    "unknown"
+                } else {
+                    &self.modrinth_game_version
+                }
+            ));
+            ui.separator();
+
+            match self.download_provider {
+                DownloadProvider::Modrinth => {
+                    ui.horizontal(|ui| {
+                        ui.label("Query:");
+                        ui.text_edit_singleline(&mut self.modrinth_query);
+                        if ui.button("Search").clicked() {
+                            self.do_modrinth_search();
                         }
-                    } else {
-                        ui.add_space(row_height);
-                    }
-                    ui.monospace(&item.name);
-                });
+                        if ui.button("Download Selected").clicked() {
+                            self.do_modrinth_download_selected();
+                        }
+                    });
+                    ui.columns(2, |cols| {
+                        cols[0].label("Результаты");
+                        cols[0].separator();
+                        egui::ScrollArea::vertical()
+                            .max_height(220.0)
+                            .show(&mut cols[0], |ui| {
+                                for (idx, hit) in self.modrinth_hits.iter().enumerate() {
+                                    let selected = self.selected_modrinth_hit == Some(idx);
+                                    let label = format!("{} ({})", hit.title, hit.slug);
+                                    if ui.selectable_label(selected, label).clicked() {
+                                        self.selected_modrinth_hit = Some(idx);
+                                    }
+                                }
+                            });
+
+                        cols[1].label("Описание");
+                        cols[1].separator();
+                        if let Some(i) = self.selected_modrinth_hit {
+                            if let Some(hit) = self.modrinth_hits.get(i) {
+                                draw_markdown_preview(&mut cols[1], &hit.description);
+                            } else {
+                                cols[1].label("Проект не выбран");
+                            }
+                        } else {
+                            cols[1].label("Проект не выбран");
+                        }
+                    });
+                }
+                DownloadProvider::CurseForge => {
+                    ui.horizontal(|ui| {
+                        ui.label("Query:");
+                        ui.text_edit_singleline(&mut self.curseforge_query);
+                        if ui.button("Open Search").clicked() {
+                            self.open_curseforge_search();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Direct file URL:");
+                        ui.text_edit_singleline(&mut self.curseforge_download_url);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Filename (optional):");
+                        ui.text_edit_singleline(&mut self.curseforge_filename);
+                        if ui.button("Download URL To mods/").clicked() {
+                            self.do_curseforge_download_url();
+                        }
+                    });
+                    ui.label(
+                        "В CurseForge режиме поиск открывается в браузере, а прямая ссылка скачивается в mods/ выбранного инстанса.",
+                    );
+                }
             }
         });
     }
@@ -1279,36 +1491,6 @@ impl PrismarineApp {
                     ui.monospace(&self.log_preview);
                 }
             });
-        });
-    }
-
-    fn draw_modrinth_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Query:");
-            ui.text_edit_singleline(&mut self.modrinth_query);
-            if ui.button("Search").clicked() {
-                self.do_modrinth_search();
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Loader:");
-            ui.text_edit_singleline(&mut self.modrinth_loader);
-            ui.label("Game version:");
-            ui.text_edit_singleline(&mut self.modrinth_game_version);
-        });
-        if ui.button("Download Selected To mods/").clicked() {
-            self.do_modrinth_download_selected();
-        }
-        ui.separator();
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (idx, hit) in self.modrinth_hits.iter().enumerate() {
-                let selected = self.selected_modrinth_hit == Some(idx);
-                let label = format!("{} ({})", hit.title, hit.slug);
-                if ui.selectable_label(selected, label).clicked() {
-                    self.selected_modrinth_hit = Some(idx);
-                }
-            }
         });
     }
 
@@ -1684,7 +1866,6 @@ impl App for PrismarineApp {
                     CenterTab::Overview => self.draw_overview_tab(&mut cols[1]),
                     CenterTab::Mods => self.draw_mods_tab(&mut cols[1]),
                     CenterTab::Logs => self.draw_logs_tab(&mut cols[1]),
-                    CenterTab::Modrinth => self.draw_modrinth_tab(&mut cols[1]),
                     CenterTab::Settings => self.draw_settings_tab(&mut cols[1]),
                 }
             });
@@ -1700,6 +1881,54 @@ impl App for PrismarineApp {
         self.draw_dialogs(ctx);
         self.persist();
     }
+}
+
+fn draw_markdown_preview(ui: &mut egui::Ui, markdown: &str) {
+    if markdown.trim().is_empty() {
+        ui.label("Описание отсутствует");
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .show(ui, |ui| {
+            for line in markdown.lines() {
+                let text = line.trim();
+                if text.is_empty() {
+                    ui.add_space(2.0);
+                    continue;
+                }
+                if let Some(rest) = text.strip_prefix("### ") {
+                    ui.label(egui::RichText::new(rest).strong());
+                } else if let Some(rest) = text.strip_prefix("## ") {
+                    ui.label(egui::RichText::new(rest).heading());
+                } else if let Some(rest) = text.strip_prefix("# ") {
+                    ui.label(egui::RichText::new(rest).heading());
+                } else if let Some(rest) = text.strip_prefix("- ") {
+                    ui.label(format!("• {rest}"));
+                } else if let Some(rest) = text.strip_prefix("* ") {
+                    ui.label(format!("• {rest}"));
+                } else {
+                    ui.label(text);
+                }
+            }
+        });
+}
+
+fn percent_encode_query(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.bytes() {
+        match ch {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(ch as char)
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{ch:02X}"));
+            }
+        }
+    }
+    out
 }
 
 fn load_state() -> Option<PersistedState> {
