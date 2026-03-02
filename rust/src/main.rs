@@ -690,11 +690,11 @@ impl PrismarineApp {
                     .verification_uri_complete
                     .clone()
                     .unwrap_or_else(|| device.verification_uri.clone());
-                let _ = Command::new("sh")
-                    .arg("-lc")
-                    .arg(format!("xdg-open {}", shell_escape(&open_url)))
-                    .status();
-
+                // Show code/QR in UI immediately, then open browser in a non-blocking way.
+                self.device_login_qr_payload = open_url.clone();
+                self.device_login_status =
+                    "Ожидание подтверждения в браузере/Microsoft...".to_string();
+                self.device_login_info = Some(device.clone());
                 let (tx, rx) = mpsc::channel::<DeviceLoginEvent>();
                 let device_copy = device.clone();
                 std::thread::spawn(move || {
@@ -705,12 +705,12 @@ impl PrismarineApp {
                     let _ = tx.send(event);
                 });
 
-                self.device_login_qr_payload = open_url;
-                self.device_login_status =
-                    "Ожидание подтверждения в браузере/Microsoft...".to_string();
-                self.device_login_info = Some(device);
                 self.device_login_receiver = Some(rx);
                 self.status = "Microsoft login started".to_string();
+                let _ = Command::new("sh")
+                    .arg("-lc")
+                    .arg(format!("xdg-open {}", shell_escape(&open_url)))
+                    .spawn();
             }
             Err(err) => {
                 self.status = format!("Failed to start Microsoft device login: {err}");
@@ -2410,9 +2410,19 @@ impl PrismarineApp {
                             name.push_str(" [unverified]");
                         }
                     }
-                    if ui.selectable_label(active, name).clicked() {
-                        self.set_active_account(idx);
-                    }
+                    ui.horizontal(|ui| {
+                        let skin_name = self.accounts[idx].name.clone();
+                        let body_url = minecraft_body_icon_url(&skin_name);
+                        if let Some(tex) = self.ensure_icon_texture_from_source(ui.ctx(), &body_url)
+                        {
+                            ui.image((tex.id(), egui::vec2(12.0, 24.0)));
+                        } else {
+                            ui.add_space(12.0);
+                        }
+                        if ui.selectable_label(active, name).clicked() {
+                            self.set_active_account(idx);
+                        }
+                    });
                 }
                 ui.separator();
                 if ui.button("Add Licensed Account").clicked() {
@@ -3347,7 +3357,7 @@ impl PrismarineApp {
                                     let _ = Command::new("sh")
                                         .arg("-lc")
                                         .arg(format!("xdg-open {}", shell_escape(&open_url)))
-                                        .status();
+                                        .spawn();
                                 }
                             }
                         });
@@ -3362,6 +3372,26 @@ impl PrismarineApp {
                             if !self.device_login_status.is_empty() {
                                 ui.label(&self.device_login_status);
                             }
+                        }
+                        if !self.new_account_name.trim().is_empty() {
+                            ui.separator();
+                            ui.label("Skin Preview:");
+                            ui.horizontal(|ui| {
+                                let head_url =
+                                    minecraft_head_icon_url(self.new_account_name.trim());
+                                let body_url =
+                                    minecraft_body_icon_url(self.new_account_name.trim());
+                                if let Some(tex) =
+                                    self.ensure_icon_texture_from_source(ui.ctx(), &head_url)
+                                {
+                                    ui.image((tex.id(), egui::vec2(48.0, 48.0)));
+                                }
+                                if let Some(tex) =
+                                    self.ensure_icon_texture_from_source(ui.ctx(), &body_url)
+                                {
+                                    ui.image((tex.id(), egui::vec2(32.0, 64.0)));
+                                }
+                            });
                         }
                         ui.separator();
                         ui.label("Manual token fallback:");
@@ -3567,6 +3597,20 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+
+fn minecraft_head_icon_url(name: &str) -> String {
+    format!(
+        "https://crafatar.com/avatars/{}?size=64&overlay=true",
+        percent_encode_query(name)
+    )
+}
+
+fn minecraft_body_icon_url(name: &str) -> String {
+    format!(
+        "https://crafatar.com/renders/body/{}?overlay=true",
+        percent_encode_query(name)
+    )
 }
 
 fn preferred_mods_dir(instance_path: &Path) -> PathBuf {
