@@ -1,5 +1,8 @@
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use std::ffi::{CStr, c_char};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 #[repr(C)]
 pub struct PrismarineTimestampResult {
@@ -8,12 +11,19 @@ pub struct PrismarineTimestampResult {
     pub is_valid: u8,
 }
 
-fn parse_s3_time(input: &str) -> Option<(i64, i32)> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstanceSummary {
+    pub name: String,
+    pub path: PathBuf,
+    pub modified_unix_ms: i64,
+}
+
+pub fn parse_s3_time(input: &str) -> Option<(i64, i32)> {
     let parsed = DateTime::parse_from_rfc3339(input).ok()?;
     Some((parsed.timestamp_millis(), parsed.offset().local_minus_utc()))
 }
 
-fn format_s3_time(unix_ms_utc: i64, offset_seconds: i32) -> Option<String> {
+pub fn format_s3_time(unix_ms_utc: i64, offset_seconds: i32) -> Option<String> {
     let offset = FixedOffset::east_opt(offset_seconds)?;
     let utc = Utc.timestamp_millis_opt(unix_ms_utc).single()?;
     let local = utc.with_timezone(&offset);
@@ -36,6 +46,45 @@ fn write_c_string(src: &str, out_buffer: *mut c_char, out_buffer_len: usize) -> 
         *out_buffer.add(bytes.len()) = 0;
     }
     Ok(())
+}
+
+pub fn scan_instances(root: &Path) -> std::io::Result<Vec<InstanceSummary>> {
+    let mut out = Vec::new();
+    if !root.is_dir() {
+        return Ok(out);
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|x| x.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+
+        let meta = entry.metadata()?;
+        let modified_unix_ms = meta
+            .modified()
+            .ok()
+            .and_then(|x| x.duration_since(UNIX_EPOCH).ok())
+            .map(|x| x.as_millis() as i64)
+            .unwrap_or(0);
+
+        out.push(InstanceSummary {
+            name: name.to_string(),
+            path,
+            modified_unix_ms,
+        });
+    }
+
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
 }
 
 #[unsafe(no_mangle)]
@@ -90,7 +139,9 @@ pub extern "C" fn prismarine_format_s3_time(
 
 #[cfg(test)]
 mod tests {
-    use super::{format_s3_time, parse_s3_time};
+    use super::{format_s3_time, parse_s3_time, scan_instances};
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn s3_parse_and_format_round_trip() {
@@ -110,5 +161,25 @@ mod tests {
             let serialized = format_s3_time(ms, offset).expect("format");
             assert_eq!(serialized, case);
         }
+    }
+
+    #[test]
+    fn scan_instances_lists_directories() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let base = PathBuf::from(format!("/tmp/prismarine_launcher_test_{}_{}", std::process::id(), nanos));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("Alpha")).expect("create alpha");
+        fs::create_dir_all(base.join("Beta")).expect("create beta");
+        fs::write(base.join("README.txt"), b"x").expect("create file");
+
+        let items = scan_instances(&base).expect("scan");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "Alpha");
+        assert_eq!(items[1].name, "Beta");
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
