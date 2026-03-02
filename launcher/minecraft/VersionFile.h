@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- *  Amethyst Launcher - Minecraft Launcher
+ *  Prismarine Launcher - Minecraft Launcher
  *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
  *
  *  This program is free software: you can redistribute it and/or modify
@@ -65,19 +65,19 @@ class VersionFile : public ProblemContainer {
     void applyTo(LaunchProfile* profile, const RuntimeContext& runtimeContext);
 
    public: /* data */
-    /// Amethyst Launcher: order hint for this version file if no explicit order is set
+    /// Prismarine Launcher: order hint for this version file if no explicit order is set
     int order = 0;
 
-    /// Amethyst Launcher: human readable name of this package
+    /// Prismarine Launcher: human readable name of this package
     QString name;
 
-    /// Amethyst Launcher: package ID of this package
+    /// Prismarine Launcher: package ID of this package
     QString uid;
 
-    /// Amethyst Launcher: version of this package
+    /// Prismarine Launcher: version of this package
     QString version;
 
-    /// Amethyst Launcher: DEPRECATED dependency on a Minecraft version
+    /// Prismarine Launcher: DEPRECATED dependency on a Minecraft version
     QString dependsOnMinecraftVersion;
 
     /// Mojang: DEPRECATED used to version the Mojang version format
@@ -89,13 +89,13 @@ class VersionFile : public ProblemContainer {
     /// Mojang: class to launch Minecraft with
     QString mainClass;
 
-    /// Amethyst Launcher: class to launch legacy Minecraft with (embed in a custom window)
+    /// Prismarine Launcher: class to launch legacy Minecraft with (embed in a custom window)
     QString appletClass;
 
     /// Mojang: Minecraft launch arguments (may contain placeholders for variable substitution)
     QString minecraftArguments;
 
-    /// Amethyst Launcher: Additional JVM launch arguments
+    /// Prismarine Launcher: Additional JVM launch arguments
     QStringList addnJvmArguments;
 
     /// Mojang: list of compatible java majors
@@ -116,38 +116,38 @@ class VersionFile : public ProblemContainer {
     /// Mojang: DEPRECATED asset group to be used with Minecraft
     QString assets;
 
-    /// Amethyst Launcher: list of tweaker mod arguments for launchwrapper
+    /// Prismarine Launcher: list of tweaker mod arguments for launchwrapper
     QStringList addTweakers;
 
     /// Mojang: list of libraries to add to the version
     QList<LibraryPtr> libraries;
 
-    /// Amethyst Launcher: list of maven files to put in the libraries folder, but not in classpath
+    /// Prismarine Launcher: list of maven files to put in the libraries folder, but not in classpath
     QList<LibraryPtr> mavenFiles;
 
-    /// Amethyst Launcher: list of agents to add to JVM arguments
+    /// Prismarine Launcher: list of agents to add to JVM arguments
     QList<AgentPtr> agents;
 
     /// The main jar (Minecraft version library, normally)
     LibraryPtr mainJar;
 
-    /// Amethyst Launcher: list of attached traits of this version file - used to enable features
+    /// Prismarine Launcher: list of attached traits of this version file - used to enable features
     QSet<QString> traits;
 
-    /// Amethyst Launcher: list of jar mods added to this version
+    /// Prismarine Launcher: list of jar mods added to this version
     QList<LibraryPtr> jarMods;
 
-    /// Amethyst Launcher: list of mods added to this version
+    /// Prismarine Launcher: list of mods added to this version
     QList<LibraryPtr> mods;
 
     /**
-     * Amethyst Launcher: set of packages this depends on
+     * Prismarine Launcher: set of packages this depends on
      * NOTE: this is shared with the meta format!!!
      */
     Meta::RequireSet m_requires;
 
     /**
-     * Amethyst Launcher: set of packages this conflicts with
+     * Prismarine Launcher: set of packages this conflicts with
      * NOTE: this is shared with the meta format!!!
      */
     Meta::RequireSet conflicts;

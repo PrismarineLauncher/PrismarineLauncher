@@ -457,7 +457,7 @@
     <iconset theme="launcher"/>
    </property>
    <property name="text">
-    <string>Amethyst Launcher (zip)</string>
+    <string>Prismarine Launcher (zip)</string>
    </property>
   </action>
   <action name="actionExportInstanceMrPack">

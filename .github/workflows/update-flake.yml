@@ -10,7 +10,7 @@ permissions: {}
 
 jobs:
   update-flake:
-    if: github.repository == 'AmethystLauncher/AmethystLauncher'
+    if: github.repository == 'PrismarineLauncher/PrismarineLauncher'
 
     permissions:
       contents: write

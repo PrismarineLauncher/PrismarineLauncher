@@ -1,5 +1,5 @@
 name: Setup Dependencies
-description: Install and setup dependencies for building Amethyst Launcher
+description: Install and setup dependencies for building Prismarine Launcher
 
 inputs:
   build-type:

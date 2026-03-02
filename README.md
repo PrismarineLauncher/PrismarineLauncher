@@ -1,2 +1,2 @@
-# AmethystLauncher
+# PrismarineLauncher
 Based on prism launcher

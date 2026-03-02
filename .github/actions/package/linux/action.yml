@@ -1,5 +1,5 @@
 name: Package for Linux
-description: Create Linux packages for Amethyst Launcher
+description: Create Linux packages for Prismarine Launcher
 
 inputs:
   version:
@@ -80,20 +80,20 @@ runs:
 
         #makes the launcher use portals for file picking
         echo "QT_QPA_PLATFORMTHEME=xdgdesktopportal" > "$INSTALL_APPIMAGE_DIR"/.env
-        ln -s org.prismlauncher.AmethystLauncher.metainfo.xml "$INSTALL_APPIMAGE_DIR"/share/metainfo/org.prismlauncher.AmethystLauncher.appdata.xml
-        ln -s share/applications/org.prismlauncher.AmethystLauncher.desktop "$INSTALL_APPIMAGE_DIR"
-        ln -s share/icons/hicolor/256x256/apps/org.prismlauncher.AmethystLauncher.png "$INSTALL_APPIMAGE_DIR"
+        ln -s org.prismlauncher.PrismarineLauncher.metainfo.xml "$INSTALL_APPIMAGE_DIR"/share/metainfo/org.prismlauncher.PrismarineLauncher.appdata.xml
+        ln -s share/applications/org.prismlauncher.PrismarineLauncher.desktop "$INSTALL_APPIMAGE_DIR"
+        ln -s share/icons/hicolor/256x256/apps/org.prismlauncher.PrismarineLauncher.png "$INSTALL_APPIMAGE_DIR"
         mv "$INSTALL_APPIMAGE_DIR"/{sharun,AppRun}
         ls -la "$INSTALL_APPIMAGE_DIR"
 
         if [[ "${{ github.ref_type }}" == "tag" ]]; then
-          APPIMAGE_DEST="AmethystLauncher-Linux-$APPIMAGE_ARCH.AppImage"
+          APPIMAGE_DEST="PrismarineLauncher-Linux-$APPIMAGE_ARCH.AppImage"
         else
-          APPIMAGE_DEST="AmethystLauncher-Linux-$VERSION-${{ inputs.build-type }}-$APPIMAGE_ARCH.AppImage"
+          APPIMAGE_DEST="PrismarineLauncher-Linux-$VERSION-${{ inputs.build-type }}-$APPIMAGE_ARCH.AppImage"
         fi
 
         mkappimage \
-          --updateinformation "gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|AmethystLauncher-Linux-$APPIMAGE_ARCH.AppImage.zsync" \
+          --updateinformation "gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|latest|PrismarineLauncher-Linux-$APPIMAGE_ARCH.AppImage.zsync" \
           "$INSTALL_APPIMAGE_DIR" \
           "$APPIMAGE_DEST"
 
@@ -118,22 +118,22 @@ runs:
 
         for l in $(find ${{ env.INSTALL_PORTABLE_DIR }} -type f -o -type l); do l=${l#$(pwd)/}; l=${l#${{ env.INSTALL_PORTABLE_DIR }}/}; l=${l#./}; echo $l; done > ${{ env.INSTALL_PORTABLE_DIR }}/manifest.txt
         cd ${{ env.INSTALL_PORTABLE_DIR }}
-        tar -czf ../AmethystLauncher-portable.tar.gz *
+        tar -czf ../PrismarineLauncher-portable.tar.gz *
 
     - name: Upload binary tarball
       uses: actions/upload-artifact@v6
       with:
-        name: AmethystLauncher-${{ inputs.artifact-name }}-Qt6-Portable-${{ inputs.version }}-${{ inputs.build-type }}
-        path: AmethystLauncher-portable.tar.gz
+        name: PrismarineLauncher-${{ inputs.artifact-name }}-Qt6-Portable-${{ inputs.version }}-${{ inputs.build-type }}
+        path: PrismarineLauncher-portable.tar.gz
 
     - name: Upload AppImage
       uses: actions/upload-artifact@v6
       with:
-        name: AmethystLauncher-${{ runner.os }}-${{ inputs.version }}-${{ inputs.build-type }}-${{ env.APPIMAGE_ARCH }}.AppImage
-        path: AmethystLauncher-${{ runner.os }}-*${{ env.APPIMAGE_ARCH }}.AppImage
+        name: PrismarineLauncher-${{ runner.os }}-${{ inputs.version }}-${{ inputs.build-type }}-${{ env.APPIMAGE_ARCH }}.AppImage
+        path: PrismarineLauncher-${{ runner.os }}-*${{ env.APPIMAGE_ARCH }}.AppImage
 
     - name: Upload AppImage Zsync
       uses: actions/upload-artifact@v6
       with:
-        name: AmethystLauncher-${{ runner.os }}-${{ inputs.version }}-${{ inputs.build-type }}-${{ env.APPIMAGE_ARCH }}.AppImage.zsync
-        path: AmethystLauncher-${{ runner.os }}-*${{ env.APPIMAGE_ARCH }}.AppImage.zsync
+        name: PrismarineLauncher-${{ runner.os }}-${{ inputs.version }}-${{ inputs.build-type }}-${{ env.APPIMAGE_ARCH }}.AppImage.zsync
+        path: PrismarineLauncher-${{ runner.os }}-*${{ env.APPIMAGE_ARCH }}.AppImage.zsync

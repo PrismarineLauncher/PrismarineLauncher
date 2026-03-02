@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- *  Amethyst Launcher - Minecraft Launcher
+ *  Prismarine Launcher - Minecraft Launcher
  *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
  *
  *  This program is free software: you can redistribute it and/or modify
@@ -152,7 +152,7 @@ class Library {
     QString getCompatibleNative(const RuntimeContext& runtimeContext) const;
 
    private: /* methods */
-    /// the default storage prefix used by Amethyst Launcher
+    /// the default storage prefix used by Prismarine Launcher
     static QString defaultStoragePrefix();
 
     /// Get the prefix - root of the storage to be used
@@ -170,23 +170,23 @@ class Library {
     /// DEPRECATED URL prefix of the maven repo where the file can be downloaded
     QString m_repositoryURL;
 
-    /// DEPRECATED: Amethyst Launcher-specific absolute URL. takes precedence over the implicit maven repo URL, if defined
+    /// DEPRECATED: Prismarine Launcher-specific absolute URL. takes precedence over the implicit maven repo URL, if defined
     QString m_absoluteURL;
 
-    /// Amethyst Launcher extension - filename override
+    /// Prismarine Launcher extension - filename override
     QString m_filename;
 
-    /// DEPRECATED Amethyst Launcher extension - display name
+    /// DEPRECATED Prismarine Launcher extension - display name
     QString m_displayname;
 
     /**
-     * Amethyst Launcher-specific type hint - modifies how the library is treated
+     * Prismarine Launcher-specific type hint - modifies how the library is treated
      */
     QString m_hint;
 
     /**
-     * storage - by default the local libraries folder in Amethyst Launcher, but could be elsewhere
-     * Amethyst Launcher specific, because of FTB.
+     * storage - by default the local libraries folder in Prismarine Launcher, but could be elsewhere
+     * Prismarine Launcher specific, because of FTB.
      */
     QString m_storagePrefix;
 

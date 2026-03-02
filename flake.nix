@@ -12,7 +12,7 @@
     nixpkgs.url = "https://channels.nixos.org/nixos-25.11/nixexprs.tar.xz";
 
     libnbtplusplus = {
-      url = "github:AmethystLauncher/libnbtplusplus";
+      url = "github:PrismarineLauncher/libnbtplusplus";
       flake = false;
     };
   };
@@ -90,7 +90,7 @@
           packages' = self.packages.${system};
 
           welcomeMessage = ''
-            Welcome to the Amethyst Launcher repository! 🌈
+            Welcome to the Prismarine Launcher repository! 🌈
 
             We just set some things up for you. To get building, you can run:
 

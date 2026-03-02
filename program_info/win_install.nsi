@@ -6,15 +6,15 @@
 
 Unicode true
 
-Name "Amethyst Launcher"
-InstallDir "$LOCALAPPDATA\Programs\AmethystLauncher"
-InstallDirRegKey HKCU "Software\AmethystLauncher" "InstallDir"
+Name "Prismarine Launcher"
+InstallDir "$LOCALAPPDATA\Programs\PrismarineLauncher"
+InstallDirRegKey HKCU "Software\PrismarineLauncher" "InstallDir"
 RequestExecutionLevel user
-OutFile "../AmethystLauncher-Setup.exe"
+OutFile "../PrismarineLauncher-Setup.exe"
 
 !define MUI_ICON "../program_info/prismlauncher.ico"
 
-!define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\AmethystLauncher"
+!define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismarineLauncher"
 
 ;--------------------------------
 
@@ -108,9 +108,9 @@ OutFile "../AmethystLauncher-Setup.exe"
 ; Version info
 VIProductVersion "11.0.0.0"
 VIFileVersion "11.0.0.0"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductName" "Amethyst Launcher"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "FileDescription" "Amethyst Launcher Installer"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "LegalCopyright" "© 2022-2026 Amethyst Launcher Contributors\n© 2021-2022 PolyMC Contributors\n© 2012-2021 MultiMC Contributors"
+VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductName" "Prismarine Launcher"
+VIAddVersionKey /LANG=${LANG_ENGLISH} "FileDescription" "Prismarine Launcher Installer"
+VIAddVersionKey /LANG=${LANG_ENGLISH} "LegalCopyright" "© 2022-2026 Prismarine Launcher Contributors\n© 2021-2022 PolyMC Contributors\n© 2012-2021 MultiMC Contributors"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "FileVersion" "11.0.0.0"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductVersion" "11.0.0.0"
 
@@ -365,7 +365,7 @@ SectionEnd
 ;------------------------------------
 
 ; The stuff to install
-Section "Amethyst Launcher"
+Section "Prismarine Launcher"
 
   SectionIn RO
 
@@ -387,7 +387,7 @@ Section "Amethyst Launcher"
   File /nonfatal /r "tls"
 
   ; Write the installation path into the registry
-  WriteRegStr HKCU Software\AmethystLauncher "InstallDir" "$INSTDIR"
+  WriteRegStr HKCU Software\PrismarineLauncher "InstallDir" "$INSTDIR"
 
   ; Write the URL Handler into registry for curseforge
   WriteRegStr HKCU Software\Classes\curseforge "URL Protocol" ""
@@ -402,12 +402,12 @@ Section "Amethyst Launcher"
   ${GetParameters} $R0
   ${GetOptions} $R0 "/NoUninstaller" $R1
   ${If} ${Errors}
-    WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "Amethyst Launcher"
+    WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "Prismarine Launcher"
     WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\amethystlauncher.exe"
     WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe" _?=$INSTDIR'
     WriteRegStr HKCU "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S _?=$INSTDIR'
     WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
-    WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "Amethyst Launcher Contributors"
+    WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "Prismarine Launcher Contributors"
     WriteRegStr HKCU "${UNINST_KEY}" "Version" "11.0.0.0"
     WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "11.0.0"
     WriteRegStr HKCU "${UNINST_KEY}" "VersionMajor" "11"
@@ -426,23 +426,23 @@ SectionEnd
 
 Section "Start Menu Shortcut" SM_SHORTCUTS
 
-  CreateShortcut "$SMPROGRAMS\Amethyst Launcher.lnk" "$INSTDIR\amethystlauncher.exe" "" "$INSTDIR\amethystlauncher.exe" 0
+  CreateShortcut "$SMPROGRAMS\Prismarine Launcher.lnk" "$INSTDIR\amethystlauncher.exe" "" "$INSTDIR\amethystlauncher.exe" 0
 
 SectionEnd
 
 Section /o "Desktop Shortcut" DESKTOP_SHORTCUTS
 
-  CreateShortcut "$DESKTOP\Amethyst Launcher.lnk" "$INSTDIR\amethystlauncher.exe" "" "$INSTDIR\amethystlauncher.exe" 0
+  CreateShortcut "$DESKTOP\Prismarine Launcher.lnk" "$INSTDIR\amethystlauncher.exe" "" "$INSTDIR\amethystlauncher.exe" 0
 
 SectionEnd
 
 
-!define APPID "AmethystLauncher.App"
+!define APPID "PrismarineLauncher.App"
 !define APPEXE "amethystlauncher.exe"
 !define APPICON "$INSTDIR\${APPEXE},0"
-!define APPDESCRIPTION "Amethyst Launcher"
-!define APPNAME "Amethyst Launcher"
-!define APPCMDTEXT "Amethyst Launcher"
+!define APPDESCRIPTION "Prismarine Launcher"
+!define APPNAME "Prismarine Launcher"
+!define APPCMDTEXT "Prismarine Launcher"
 
 Section /o "Shell Association (Open-With dialog)" SHELL_ASSOC
 
@@ -463,8 +463,8 @@ Section "Uninstall"
 
   nsExec::Exec /TIMEOUT=2000 'TaskKill /IM amethystlauncher.exe /F'
 
-  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\AmethystLauncher"
-  DeleteRegKey HKCU SOFTWARE\AmethystLauncher
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\PrismarineLauncher"
+  DeleteRegKey HKCU SOFTWARE\PrismarineLauncher
 
   Delete $INSTDIR\amethystlauncher.exe
   Delete $INSTDIR\amethystlauncher_filelink.exe
@@ -481,8 +481,8 @@ Section "Uninstall"
   RMDir /r $INSTDIR\styles
   RMDir /r $INSTDIR\tls
 
-  Delete "$SMPROGRAMS\Amethyst Launcher.lnk"
-  Delete "$DESKTOP\Amethyst Launcher.lnk"
+  Delete "$SMPROGRAMS\Prismarine Launcher.lnk"
+  Delete "$DESKTOP\Prismarine Launcher.lnk"
 
   RMDir "$INSTDIR"
 

@@ -1,8 +1,8 @@
-# Amethyst Launcher Nix Packaging
+# Prismarine Launcher Nix Packaging
 
 ## Installing a stable release (nixpkgs)
 
-Amethyst Launcher is packaged in [nixpkgs](https://github.com/NixOS/nixpkgs/) since 22.11.
+Prismarine Launcher is packaged in [nixpkgs](https://github.com/NixOS/nixpkgs/) since 22.11.
 
 Check the [NixOS Wiki](https://wiki.nixos.org/wiki/Prism_Launcher) for up-to-date instructions.
 
@@ -28,7 +28,7 @@ Example (NixOS):
 
 ### Installing the package directly
 
-After adding `github:AmethystLauncher/AmethystLauncher` to your flake inputs, you can access the flake's `packages` output.
+After adding `github:PrismarineLauncher/PrismarineLauncher` to your flake inputs, you can access the flake's `packages` output.
 
 Example:
 
@@ -38,7 +38,7 @@ Example:
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     prismlauncher = {
-      url = "github:AmethystLauncher/AmethystLauncher";
+      url = "github:PrismarineLauncher/PrismarineLauncher";
 
       # Optional: Override the nixpkgs input of prismlauncher to use the same revision as the rest of your flake
       # Note that this may break the reproducibility mentioned above, and you might not be able to access the binary cache
@@ -83,7 +83,7 @@ Example:
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     prismlauncher = {
-      url = "github:AmethystLauncher/AmethystLauncher";
+      url = "github:PrismarineLauncher/PrismarineLauncher";
 
       # Optional: Override the nixpkgs input of prismlauncher to use the same revision as the rest of your flake
       # Note that this may break the reproducibility mentioned above, and you might not be able to access the binary cache
@@ -120,11 +120,11 @@ You can simply call the default package of this flake.
 Example:
 
 ```shell
-nix run github:AmethystLauncher/AmethystLauncher
+nix run github:PrismarineLauncher/PrismarineLauncher
 
-nix shell github:AmethystLauncher/AmethystLauncher
+nix shell github:PrismarineLauncher/PrismarineLauncher
 
-nix profile install github:AmethystLauncher/AmethystLauncher
+nix profile install github:PrismarineLauncher/PrismarineLauncher
 ```
 
 ## Installing a development release (without flakes)
@@ -157,7 +157,7 @@ Example:
 {
   environment.systemPackages = [
     (import (
-      builtins.fetchTarball "https://github.com/AmethystLauncher/AmethystLauncher/archive/develop.tar.gz"
+      builtins.fetchTarball "https://github.com/PrismarineLauncher/PrismarineLauncher/archive/develop.tar.gz"
     )).packages.${pkgs.system}.prismlauncher
   ];
 }
@@ -175,7 +175,7 @@ Example:
 {
   nixpkgs.overlays = [
     (import (
-      builtins.fetchTarball "https://github.com/AmethystLauncher/AmethystLauncher/archive/develop.tar.gz"
+      builtins.fetchTarball "https://github.com/PrismarineLauncher/PrismarineLauncher/archive/develop.tar.gz"
     )).overlays.default
   ];
 
@@ -190,7 +190,7 @@ You can add this repository as a channel and install its packages that way.
 Example:
 
 ```shell
-nix-channel --add https://github.com/AmethystLauncher/AmethystLauncher/archive/develop.tar.gz prismlauncher
+nix-channel --add https://github.com/PrismarineLauncher/PrismarineLauncher/archive/develop.tar.gz prismlauncher
 
 nix-channel --update prismlauncher
 

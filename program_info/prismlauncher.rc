@@ -15,10 +15,10 @@ BEGIN
         BEGIN
                 BLOCK "000004b0"
                 BEGIN
-                        VALUE "CompanyName", "MultiMC & Amethyst Launcher Contributors"
-                        VALUE "FileDescription", "Amethyst Launcher"
+                        VALUE "CompanyName", "MultiMC & Prismarine Launcher Contributors"
+                        VALUE "FileDescription", "Prismarine Launcher"
                         VALUE "FileVersion", "11.0.0.0"
-                        VALUE "ProductName", "Amethyst Launcher"
+                        VALUE "ProductName", "Prismarine Launcher"
                         VALUE "ProductVersion", "11.0.0.0"
                 END
         END

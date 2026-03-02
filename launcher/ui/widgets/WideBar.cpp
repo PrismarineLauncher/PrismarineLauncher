@@ -292,6 +292,18 @@ void WideBar::setVisibilityState(QByteArray&& state)
     }
 }
 
+void WideBar::setActionVisible(QAction* action, bool visible)
+{
+    auto iter = getMatching(action);
+    if (iter == m_entries.end())
+        return;
+    if (iter->type != BarEntry::Type::Action)
+        return;
+
+    iter->bar_action->setVisible(visible);
+    static_cast<ActionButton*>(widgetForAction(iter->bar_action))->actionChanged();
+}
+
 QByteArray WideBar::getHash() const
 {
     QCryptographicHash hash(QCryptographicHash::Sha1);

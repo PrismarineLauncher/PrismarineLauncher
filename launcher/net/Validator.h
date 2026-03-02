@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- *  Amethyst Launcher - Minecraft Launcher
+ *  Prismarine Launcher - Minecraft Launcher
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-LAUNCHER_APPID="org.prismlauncher.AmethystLauncher"
+LAUNCHER_APPID="org.prismlauncher.PrismarineLauncher"
 
 svg2png() {
     input_file="$1"

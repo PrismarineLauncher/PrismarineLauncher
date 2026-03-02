@@ -34,7 +34,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: "true"
-          path: "AmethystLauncher-source"
+          path: "PrismarineLauncher-source"
       - name: Download artifacts
         uses: actions/download-artifact@v7
       - name: Grab and store version
@@ -43,50 +43,50 @@ jobs:
           echo "VERSION=$tag_name" >> $GITHUB_ENV
       - name: Package artifacts properly
         run: |
-          mv ${{ github.workspace }}/AmethystLauncher-source AmethystLauncher-${{ env.VERSION }}
-          mv AmethystLauncher-Linux-Qt6-Portable*/AmethystLauncher-portable.tar.gz AmethystLauncher-Linux-Qt6-Portable-${{ env.VERSION }}.tar.gz
-          mv AmethystLauncher-Linux-aarch64-Qt6-Portable*/AmethystLauncher-portable.tar.gz AmethystLauncher-Linux-aarch64-Qt6-Portable-${{ env.VERSION }}.tar.gz
-          mv AmethystLauncher-*.AppImage/AmethystLauncher-*-x86_64.AppImage AmethystLauncher-Linux-x86_64.AppImage
-          mv AmethystLauncher-*.AppImage.zsync/AmethystLauncher-*-x86_64.AppImage.zsync AmethystLauncher-Linux-x86_64.AppImage.zsync
-          mv AmethystLauncher-*.AppImage/AmethystLauncher-*-aarch64.AppImage AmethystLauncher-Linux-aarch64.AppImage
-          mv AmethystLauncher-*.AppImage.zsync/AmethystLauncher-*-aarch64.AppImage.zsync AmethystLauncher-Linux-aarch64.AppImage.zsync
-          mv AmethystLauncher-macOS*/AmethystLauncher.zip AmethystLauncher-macOS-${{ env.VERSION }}.zip
+          mv ${{ github.workspace }}/PrismarineLauncher-source PrismarineLauncher-${{ env.VERSION }}
+          mv PrismarineLauncher-Linux-Qt6-Portable*/PrismarineLauncher-portable.tar.gz PrismarineLauncher-Linux-Qt6-Portable-${{ env.VERSION }}.tar.gz
+          mv PrismarineLauncher-Linux-aarch64-Qt6-Portable*/PrismarineLauncher-portable.tar.gz PrismarineLauncher-Linux-aarch64-Qt6-Portable-${{ env.VERSION }}.tar.gz
+          mv PrismarineLauncher-*.AppImage/PrismarineLauncher-*-x86_64.AppImage PrismarineLauncher-Linux-x86_64.AppImage
+          mv PrismarineLauncher-*.AppImage.zsync/PrismarineLauncher-*-x86_64.AppImage.zsync PrismarineLauncher-Linux-x86_64.AppImage.zsync
+          mv PrismarineLauncher-*.AppImage/PrismarineLauncher-*-aarch64.AppImage PrismarineLauncher-Linux-aarch64.AppImage
+          mv PrismarineLauncher-*.AppImage.zsync/PrismarineLauncher-*-aarch64.AppImage.zsync PrismarineLauncher-Linux-aarch64.AppImage.zsync
+          mv PrismarineLauncher-macOS*/PrismarineLauncher.zip PrismarineLauncher-macOS-${{ env.VERSION }}.zip
 
-          tar --exclude='.git' -czf AmethystLauncher-${{ env.VERSION }}.tar.gz AmethystLauncher-${{ env.VERSION }}
+          tar --exclude='.git' -czf PrismarineLauncher-${{ env.VERSION }}.tar.gz PrismarineLauncher-${{ env.VERSION }}
 
-          for d in AmethystLauncher-Windows-MSVC*; do
+          for d in PrismarineLauncher-Windows-MSVC*; do
             cd "${d}" || continue
             LEGACY="$(echo -n ${d} | grep -o Legacy || true)"
             ARM64="$(echo -n ${d} | grep -o arm64 || true)"
             INST="$(echo -n ${d} | grep -o Setup || true)"
             PORT="$(echo -n ${d} | grep -o Portable || true)"
-            NAME="AmethystLauncher-Windows-MSVC"
+            NAME="PrismarineLauncher-Windows-MSVC"
             test -z "${LEGACY}" || NAME="${NAME}-Legacy"
             test -z "${ARM64}" || NAME="${NAME}-arm64"
             test -z "${PORT}" || NAME="${NAME}-Portable"
-            test -z "${INST}" || mv AmethystLauncher-*.exe ../${NAME}-Setup-${{ env.VERSION }}.exe
+            test -z "${INST}" || mv PrismarineLauncher-*.exe ../${NAME}-Setup-${{ env.VERSION }}.exe
             test -n "${INST}" || zip -r -9 "../${NAME}-${{ env.VERSION }}.zip" *
             cd ..
           done
 
-          for d in AmethystLauncher-Windows-MinGW-w64*; do
+          for d in PrismarineLauncher-Windows-MinGW-w64*; do
             cd "${d}" || continue
             INST="$(echo -n ${d} | grep -o Setup || true)"
             PORT="$(echo -n ${d} | grep -o Portable || true)"
-            NAME="AmethystLauncher-Windows-MinGW-w64"
+            NAME="PrismarineLauncher-Windows-MinGW-w64"
             test -z "${PORT}" || NAME="${NAME}-Portable"
-            test -z "${INST}" || mv AmethystLauncher-*.exe ../${NAME}-Setup-${{ env.VERSION }}.exe
+            test -z "${INST}" || mv PrismarineLauncher-*.exe ../${NAME}-Setup-${{ env.VERSION }}.exe
             test -n "${INST}" || zip -r -9 "../${NAME}-${{ env.VERSION }}.zip" *
             cd ..
           done
 
-          for d in AmethystLauncher-Windows-MinGW-arm64*; do
+          for d in PrismarineLauncher-Windows-MinGW-arm64*; do
             cd "${d}" || continue
             INST="$(echo -n ${d} | grep -o Setup || true)"
             PORT="$(echo -n ${d} | grep -o Portable || true)"
-            NAME="AmethystLauncher-Windows-MinGW-arm64"
+            NAME="PrismarineLauncher-Windows-MinGW-arm64"
             test -z "${PORT}" || NAME="${NAME}-Portable"
-            test -z "${INST}" || mv AmethystLauncher-*.exe ../${NAME}-Setup-${{ env.VERSION }}.exe
+            test -z "${INST}" || mv PrismarineLauncher-*.exe ../${NAME}-Setup-${{ env.VERSION }}.exe
             test -n "${INST}" || zip -r -9 "../${NAME}-${{ env.VERSION }}.zip" *
             cd ..
           done
@@ -97,28 +97,28 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ github.ref }}
-          name: Amethyst Launcher ${{ env.VERSION }}
+          name: Prismarine Launcher ${{ env.VERSION }}
           draft: true
           prerelease: false
           fail_on_unmatched_files: true
           files: |
-            AmethystLauncher-Linux-x86_64.AppImage
-            AmethystLauncher-Linux-x86_64.AppImage.zsync
-            AmethystLauncher-Linux-aarch64.AppImage
-            AmethystLauncher-Linux-aarch64.AppImage.zsync
-            AmethystLauncher-Linux-Qt6-Portable-${{ env.VERSION }}.tar.gz
-            AmethystLauncher-Linux-aarch64-Qt6-Portable-${{ env.VERSION }}.tar.gz
-            AmethystLauncher-Windows-MinGW-w64-${{ env.VERSION }}.zip
-            AmethystLauncher-Windows-MinGW-w64-Portable-${{ env.VERSION }}.zip
-            AmethystLauncher-Windows-MinGW-w64-Setup-${{ env.VERSION }}.exe
-            AmethystLauncher-Windows-MinGW-arm64-${{ env.VERSION }}.zip
-            AmethystLauncher-Windows-MinGW-arm64-Portable-${{ env.VERSION }}.zip
-            AmethystLauncher-Windows-MinGW-arm64-Setup-${{ env.VERSION }}.exe
-            AmethystLauncher-Windows-MSVC-arm64-${{ env.VERSION }}.zip
-            AmethystLauncher-Windows-MSVC-arm64-Portable-${{ env.VERSION }}.zip
-            AmethystLauncher-Windows-MSVC-arm64-Setup-${{ env.VERSION }}.exe
-            AmethystLauncher-Windows-MSVC-${{ env.VERSION }}.zip
-            AmethystLauncher-Windows-MSVC-Portable-${{ env.VERSION }}.zip
-            AmethystLauncher-Windows-MSVC-Setup-${{ env.VERSION }}.exe
-            AmethystLauncher-macOS-${{ env.VERSION }}.zip
-            AmethystLauncher-${{ env.VERSION }}.tar.gz
+            PrismarineLauncher-Linux-x86_64.AppImage
+            PrismarineLauncher-Linux-x86_64.AppImage.zsync
+            PrismarineLauncher-Linux-aarch64.AppImage
+            PrismarineLauncher-Linux-aarch64.AppImage.zsync
+            PrismarineLauncher-Linux-Qt6-Portable-${{ env.VERSION }}.tar.gz
+            PrismarineLauncher-Linux-aarch64-Qt6-Portable-${{ env.VERSION }}.tar.gz
+            PrismarineLauncher-Windows-MinGW-w64-${{ env.VERSION }}.zip
+            PrismarineLauncher-Windows-MinGW-w64-Portable-${{ env.VERSION }}.zip
+            PrismarineLauncher-Windows-MinGW-w64-Setup-${{ env.VERSION }}.exe
+            PrismarineLauncher-Windows-MinGW-arm64-${{ env.VERSION }}.zip
+            PrismarineLauncher-Windows-MinGW-arm64-Portable-${{ env.VERSION }}.zip
+            PrismarineLauncher-Windows-MinGW-arm64-Setup-${{ env.VERSION }}.exe
+            PrismarineLauncher-Windows-MSVC-arm64-${{ env.VERSION }}.zip
+            PrismarineLauncher-Windows-MSVC-arm64-Portable-${{ env.VERSION }}.zip
+            PrismarineLauncher-Windows-MSVC-arm64-Setup-${{ env.VERSION }}.exe
+            PrismarineLauncher-Windows-MSVC-${{ env.VERSION }}.zip
+            PrismarineLauncher-Windows-MSVC-Portable-${{ env.VERSION }}.zip
+            PrismarineLauncher-Windows-MSVC-Setup-${{ env.VERSION }}.exe
+            PrismarineLauncher-macOS-${{ env.VERSION }}.zip
+            PrismarineLauncher-${{ env.VERSION }}.tar.gz

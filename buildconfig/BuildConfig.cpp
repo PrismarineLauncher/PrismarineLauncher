@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /*
- *  Amethyst Launcher - Minecraft Launcher
+ *  Prismarine Launcher - Minecraft Launcher
  *  Copyright (C) 2022 Sefa Eyeoglu <contact@scrumplex.net>
  *
  *  This program is free software: you can redistribute it and/or modify
@@ -41,17 +41,17 @@ const Config BuildConfig;
 Config::Config()
 {
     // Name and copyright
-    LAUNCHER_NAME = "AmethystLauncher";
+    LAUNCHER_NAME = "PrismarineLauncher";
     LAUNCHER_APP_BINARY_NAME = "amethystlauncher";
-    LAUNCHER_DISPLAYNAME = "Amethyst Launcher";
-    LAUNCHER_COPYRIGHT = "© 2022-2026 Amethyst Launcher Contributors\n© 2021-2022 PolyMC Contributors\n© 2012-2021 MultiMC Contributors";
+    LAUNCHER_DISPLAYNAME = "Prismarine Launcher";
+    LAUNCHER_COPYRIGHT = "© 2022-2026 Prismarine Launcher Contributors\n© 2021-2022 PolyMC Contributors\n© 2012-2021 MultiMC Contributors";
     LAUNCHER_DOMAIN = "prismlauncher.org";
     LAUNCHER_CONFIGFILE = "prismlauncher.cfg";
-    LAUNCHER_GIT = "https://github.com/AmethystLauncher/AmethystLauncher";
-    LAUNCHER_APPID = "org.prismlauncher.AmethystLauncher";
-    LAUNCHER_SVGFILENAME = "org.prismlauncher.AmethystLauncher.svg";
+    LAUNCHER_GIT = "https://github.com/PrismarineLauncher/PrismarineLauncher";
+    LAUNCHER_APPID = "org.prismlauncher.PrismarineLauncher";
+    LAUNCHER_SVGFILENAME = "org.prismlauncher.PrismarineLauncher.svg";
 
-    USER_AGENT = "AmethystLauncher/11.0.0";
+    USER_AGENT = "PrismarineLauncher/11.0.0";
 
     // Version information
     VERSION_MAJOR = 11;
@@ -61,7 +61,7 @@ Config::Config()
     BUILD_PLATFORM = "unknown";
     BUILD_ARTIFACT = "";
     BUILD_DATE = "2026-02-08";
-    UPDATER_GITHUB_REPO = "https://github.com/AmethystLauncher/AmethystLauncher";
+    UPDATER_GITHUB_REPO = "https://github.com/PrismarineLauncher/PrismarineLauncher";
 
     COMPILER_NAME = "GNU";
     COMPILER_VERSION = "15.2.1";
@@ -116,7 +116,7 @@ Config::Config()
     GLFW_LIBRARY_NAME = "libglfw.so";
     OPENAL_LIBRARY_NAME = "libopenal.so";
 
-    BUG_TRACKER_URL = "https://github.com/AmethystLauncher/AmethystLauncher/issues";
+    BUG_TRACKER_URL = "https://github.com/PrismarineLauncher/PrismarineLauncher/issues";
     TRANSLATIONS_URL = "https://hosted.weblate.org/projects/prismlauncher/launcher/";
     TRANSLATION_FILES_URL = "https://i18n.prismlauncher.org/";
     MATRIX_URL = "https://prismlauncher.org/matrix";

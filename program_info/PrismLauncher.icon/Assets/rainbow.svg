@@ -10,7 +10,7 @@
   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
   xmlns:cc="http://creativecommons.org/ns#"
   xmlns:dc="http://purl.org/dc/elements/1.1/">
-  <title>Amethyst Launcher Logo</title>
+  <title>Prismarine Launcher Logo</title>
   <g stroke-width="0.26458">
     <path
       d="M 6.35,0.52917 3.8292,4.89477 6.35,6.34997 8.8703,4.89477 8.97985,1.79517 C 7.82875,1.13058 6.64105,0.52907 6.35005,0.52907 Z"
@@ -54,11 +54,11 @@
     <rdf:RDF>
       <cc:Work
         rdf:about="">
-        <dc:title>Amethyst Launcher Logo</dc:title>
+        <dc:title>Prismarine Launcher Logo</dc:title>
         <dc:date>19/10/2022</dc:date>
         <dc:creator>
           <cc:Agent>
-            <dc:title>Amethyst Launcher</dc:title>
+            <dc:title>Prismarine Launcher</dc:title>
           </cc:Agent>
         </dc:creator>
         <dc:contributor>
@@ -66,10 +66,10 @@
             <dc:title>AutiOne, Boba, ely, Fulmine, gon sawa, Pankakes, tobimori, Zeke</dc:title>
           </cc:Agent>
         </dc:contributor>
-        <dc:source>https://github.com/AmethystLauncher/AmethystLauncher</dc:source>
+        <dc:source>https://github.com/PrismarineLauncher/PrismarineLauncher</dc:source>
         <dc:publisher>
           <cc:Agent>
-            <dc:title>Amethyst Launcher</dc:title>
+            <dc:title>Prismarine Launcher</dc:title>
           </cc:Agent>
         </dc:publisher>
         <cc:license

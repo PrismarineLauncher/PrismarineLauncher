@@ -4,8 +4,8 @@
 
 
 # Configuration directories and files
-SourceDirectory: /home/tosha/Документы/GitHub/AmethystLauncher
-BuildDirectory: /home/tosha/Документы/GitHub/AmethystLauncher
+SourceDirectory: /home/tosha/Документы/GitHub/PrismarineLauncher
+BuildDirectory: /home/tosha/Документы/GitHub/PrismarineLauncher
 
 # Where to place the cost data store
 CostDataFile: 
@@ -27,7 +27,7 @@ SubmitInactivityTimeout:
 NightlyStartTime: 00:00:00 EDT
 
 # Commands for the build/test/submit cycle
-ConfigureCommand: "/usr/bin/cmake" "/home/tosha/Документы/GitHub/AmethystLauncher"
+ConfigureCommand: "/usr/bin/cmake" "/home/tosha/Документы/GitHub/PrismarineLauncher"
 MakeCommand: /usr/bin/cmake --build . --config "${CTEST_CONFIGURATION_TYPE}"
 DefaultCTestConfigurationType: Release
 

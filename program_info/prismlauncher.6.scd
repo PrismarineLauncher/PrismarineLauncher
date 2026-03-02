@@ -13,15 +13,15 @@ prismlauncher - a launcher and instance manager for Minecraft.
 
 # DESCRIPTION
 
-Amethyst Launcher is a custom launcher for Minecraft that allows you to easily manage
+Prismarine Launcher is a custom launcher for Minecraft that allows you to easily manage
 multiple installations of Minecraft at once. It also allows you to easily
 install and remove mods by simply dragging and dropping.
-Here are the current features of Amethyst Launcher.
+Here are the current features of Prismarine Launcher.
 
 # OPTIONS
 
 *-d, --dir*=DIRECTORY
-	Use DIRECTORY as the Amethyst Launcher root.
+	Use DIRECTORY as the Prismarine Launcher root.
 
 *-l, --launch*=INSTANCE_ID
 	Launch the instance specified by INSTANCE_ID.
@@ -30,7 +30,7 @@ Here are the current features of Amethyst Launcher.
 	Show the configuration window of the instance specified by INSTANCE_ID.
 
 *--alive*
-	Write a small 'live.check' file after Amethyst Launcher starts.
+	Write a small 'live.check' file after Prismarine Launcher starts.
 
 *-h, --help*
 	Display help text and exit.
@@ -69,14 +69,14 @@ variables, besides other common Qt variables:
 
 # BUGS
 
-https://github.com/AmethystLauncher/AmethystLauncher/issues
+https://github.com/PrismarineLauncher/PrismarineLauncher/issues
 
 # RESOURCES
 
-GitHub: https://github.com/AmethystLauncher/AmethystLauncher
+GitHub: https://github.com/PrismarineLauncher/PrismarineLauncher
 
 Main website: https://prismlauncher.org
 
 # AUTHORS
 
-Amethyst Launcher Contributors
+Prismarine Launcher Contributors

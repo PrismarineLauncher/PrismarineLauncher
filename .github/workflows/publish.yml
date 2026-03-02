@@ -19,7 +19,7 @@ jobs:
       - name: Publish on Winget
         uses: vedantmgoyal2009/winget-releaser@v2
         with:
-          identifier: AmethystLauncher.AmethystLauncher
+          identifier: PrismarineLauncher.PrismarineLauncher
           version: ${{ github.event.release.tag_name }}
-          installers-regex: 'AmethystLauncher-Windows-MSVC(:?-arm64|-Legacy)?-Setup-.+\.exe$'
+          installers-regex: 'PrismarineLauncher-Windows-MSVC(:?-arm64|-Legacy)?-Setup-.+\.exe$'
           token: ${{ secrets.WINGET_TOKEN }}
