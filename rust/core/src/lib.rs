@@ -38,6 +38,8 @@ pub struct LaunchProfile {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrismInstanceConfig {
+    pub icon_key: Option<String>,
+    pub intended_version: Option<String>,
     pub override_java_location: bool,
     pub java_path: Option<String>,
     pub override_java_args: bool,
@@ -247,18 +249,23 @@ pub fn rename_instance(path: &Path, new_name: &str) -> std::io::Result<PathBuf> 
 }
 
 pub fn list_mod_files(instance_path: &Path) -> std::io::Result<Vec<String>> {
-    let mods_dir = instance_path.join("mods");
-    if !mods_dir.exists() {
-        return Ok(Vec::new());
-    }
     let mut mods = Vec::new();
-    for entry in fs::read_dir(mods_dir)? {
-        let entry = entry?;
-        if let Some(name) = entry.file_name().to_str() {
-            mods.push(name.to_string());
+    for mods_dir in [instance_path.join("mods"), instance_path.join(".minecraft/mods")] {
+        if !mods_dir.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(mods_dir)? {
+            let entry = entry?;
+            if !entry.path().is_file() {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                mods.push(name.to_string());
+            }
         }
     }
     mods.sort();
+    mods.dedup();
     Ok(mods)
 }
 
@@ -319,6 +326,10 @@ pub fn load_prism_instance_config(instance_path: &Path) -> std::io::Result<Prism
         }
 
         match key {
+            "iconKey" => cfg.icon_key = Some(value.to_string()),
+            "IntendedVersion" | "MinecraftVersion" | "lastLaunchVersionId" => {
+                cfg.intended_version = Some(value.to_string())
+            }
             "OverrideJavaLocation" => cfg.override_java_location = parse_bool_cfg(value),
             "JavaPath" => cfg.java_path = Some(value.to_string()),
             "OverrideJavaArgs" => cfg.override_java_args = parse_bool_cfg(value),
@@ -701,10 +712,16 @@ mod tests {
         let created = create_instance(&root, "Alpha").expect("create instance");
         assert_eq!(created.name, "Alpha");
         fs::write(created.path.join("mods").join("example.jar"), b"jar").expect("write mod");
+        fs::create_dir_all(created.path.join(".minecraft/mods")).expect("create dot minecraft mods");
+        fs::write(
+            created.path.join(".minecraft/mods").join("another.jar"),
+            b"jar",
+        )
+        .expect("write second mod");
         fs::write(created.path.join("logs").join("latest.log"), b"hello log").expect("write log");
 
         let mods = list_mod_files(&created.path).expect("list mods");
-        assert_eq!(mods, vec!["example.jar".to_string()]);
+        assert_eq!(mods, vec!["another.jar".to_string(), "example.jar".to_string()]);
 
         let logs = list_logs(&created.path).expect("list logs");
         assert_eq!(logs.len(), 1);
@@ -775,6 +792,8 @@ mod tests {
         fs::write(
             root.join("instance.cfg"),
             "\
+iconKey=skyblock
+IntendedVersion=1.20.1
 OverrideJavaLocation=true
 JavaPath=/usr/bin/java
 OverrideJavaArgs=true
@@ -792,6 +811,8 @@ WrapperCommand=echo wrap
         .expect("write cfg");
 
         let cfg = load_prism_instance_config(&root).expect("parse cfg");
+        assert_eq!(cfg.icon_key.as_deref(), Some("skyblock"));
+        assert_eq!(cfg.intended_version.as_deref(), Some("1.20.1"));
         assert!(cfg.override_java_location);
         assert_eq!(cfg.java_path.as_deref(), Some("/usr/bin/java"));
         assert!(cfg.override_java_args);

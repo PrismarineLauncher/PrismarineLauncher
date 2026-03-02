@@ -77,6 +77,12 @@ struct Instance {
     icon_path: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ModListEntry {
+    name: String,
+    icon_path: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 struct Account {
@@ -199,7 +205,7 @@ struct PrismarineApp {
     show_copy_dialog: bool,
     copy_name: String,
     show_delete_dialog: bool,
-    mods_cache: Vec<String>,
+    mods_cache: Vec<ModListEntry>,
     logs_cache: Vec<(String, String)>,
     selected_log: Option<usize>,
     log_preview: String,
@@ -455,6 +461,107 @@ impl PrismarineApp {
         }
     }
 
+    fn detect_instance_version(&self, instance_path: &Path) -> String {
+        let cfg = load_prism_instance_config(instance_path).unwrap_or_default();
+        if let Some(version) = cfg.intended_version
+            && !version.trim().is_empty()
+        {
+            return version;
+        }
+
+        let mmc_pack = instance_path.join("mmc-pack.json");
+        if let Ok(text) = fs::read_to_string(mmc_pack)
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(components) = json.get("components").and_then(|v| v.as_array())
+        {
+            for component in components {
+                let uid = component.get("uid").and_then(|v| v.as_str()).unwrap_or("");
+                if uid == "net.minecraft"
+                    && let Some(version) = component.get("version").and_then(|v| v.as_str())
+                    && !version.trim().is_empty()
+                {
+                    return version.to_string();
+                }
+            }
+        }
+
+        if let Ok(profile) = load_launch_profile(instance_path)
+            && let Some((_, version)) = profile
+                .game_args
+                .windows(2)
+                .find(|pair| pair[0] == "--version")
+                .map(|pair| (&pair[0], &pair[1]))
+            && !version.trim().is_empty()
+        {
+            return version.to_string();
+        }
+
+        "unknown".to_string()
+    }
+
+    fn resolve_instance_icon_path(&self, instance_path: &Path) -> Option<String> {
+        let cfg = load_prism_instance_config(instance_path).unwrap_or_default();
+        if let Some(icon_key) = cfg.icon_key {
+            let trimmed = icon_key.trim();
+            if !trimmed.is_empty() && trimmed != "default" {
+                for ext in ["png", "jpg", "jpeg", "ico"] {
+                    let file_name = format!("{trimmed}.{ext}");
+                    let candidate = self.data_root.join("icons").join(&file_name);
+                    if candidate.is_file() {
+                        return Some(candidate.display().to_string());
+                    }
+                    let candidate_alt = self.instance_root().join("icons").join(&file_name);
+                    if candidate_alt.is_file() {
+                        return Some(candidate_alt.display().to_string());
+                    }
+                }
+            }
+        }
+
+        for candidate in [
+            instance_path.join("icon.png"),
+            instance_path.join(".minecraft").join("icon.png"),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate.display().to_string());
+            }
+        }
+        None
+    }
+
+    fn resolve_mod_icon_path(&self, instance_path: &Path, mod_file_name: &str) -> Option<String> {
+        let mod_path = instance_path.join("mods").join(mod_file_name);
+        let mod_path_alt = instance_path.join(".minecraft/mods").join(mod_file_name);
+        let mod_file = if mod_path.is_file() {
+            mod_path
+        } else {
+            mod_path_alt
+        };
+        if !mod_file.is_file() {
+            return None;
+        }
+
+        let stem = mod_file.file_stem()?.to_str()?.to_string();
+        let with_extension = mod_file
+            .file_name()
+            .and_then(|x| x.to_str())
+            .map(|x| x.to_string())?;
+        let parent = mod_file.parent()?;
+        for candidate in [
+            parent.join(format!("{stem}.png")),
+            parent.join(format!("{stem}.jpg")),
+            parent.join(format!("{stem}.jpeg")),
+            parent.join(format!("{with_extension}.png")),
+            parent.join(format!("{with_extension}.jpg")),
+            parent.join(format!("{with_extension}.jpeg")),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate.display().to_string());
+            }
+        }
+        None
+    }
+
     fn reload_instances(&mut self) {
         let root = self.instance_root();
         match scan_instances(&root) {
@@ -462,18 +569,11 @@ impl PrismarineApp {
                 self.instances = items
                     .into_iter()
                     .map(|item| {
-                        let icon_a = item.path.join("icon.png");
-                        let icon_b = item.path.join(".minecraft").join("icon.png");
-                        let icon_path = if icon_a.is_file() {
-                            Some(icon_a.display().to_string())
-                        } else if icon_b.is_file() {
-                            Some(icon_b.display().to_string())
-                        } else {
-                            None
-                        };
+                        let version = self.detect_instance_version(&item.path);
+                        let icon_path = self.resolve_instance_icon_path(&item.path);
                         Instance {
                             name: item.name,
-                            version: "unknown".to_string(),
+                            version,
                             running: false,
                             path: item.path.display().to_string(),
                             icon_path,
@@ -513,7 +613,13 @@ impl PrismarineApp {
 
         match list_mod_files(&path) {
             Ok(mods) => {
-                self.mods_cache = mods;
+                self.mods_cache = mods
+                    .into_iter()
+                    .map(|name| ModListEntry {
+                        icon_path: self.resolve_mod_icon_path(&path, &name),
+                        name,
+                    })
+                    .collect();
             }
             Err(err) => {
                 self.status = format!("Failed to load mods: {err}");
@@ -1116,9 +1222,22 @@ impl PrismarineApp {
             return;
         }
 
+        let mods = self.mods_cache.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for item in &self.mods_cache {
-                ui.monospace(item);
+            let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(18.0);
+            for item in &mods {
+                ui.horizontal(|ui| {
+                    if let Some(icon_path) = &item.icon_path {
+                        if let Some(tex) = self.ensure_icon_texture(ui.ctx(), icon_path) {
+                            ui.image((tex.id(), egui::vec2(row_height, row_height)));
+                        } else {
+                            ui.add_space(row_height);
+                        }
+                    } else {
+                        ui.add_space(row_height);
+                    }
+                    ui.monospace(&item.name);
+                });
             }
         });
     }
