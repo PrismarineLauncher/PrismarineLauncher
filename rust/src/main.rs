@@ -2250,11 +2250,15 @@ impl PrismarineApp {
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| key.clone());
             match exit_code {
+                Some(code) if code == 0 => {
+                    self.status = format!("{name} stopped");
+                    self.append_launcher_log(&key, "[Launcher] Process exited with code 0");
+                }
                 Some(code) => {
-                    self.status = format!("{name} stopped (exit code {code})");
+                    self.status = format!("{name} crashed (exit code {code})");
                     self.append_launcher_log(
                         &key,
-                        &format!("[Launcher] Process exited with code {code}"),
+                        &format!("[Launcher] Process crashed with code {code}"),
                     );
                 }
                 None => {
@@ -2796,7 +2800,18 @@ impl PrismarineApp {
         }
 
         match cmd.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    let code = status.code().unwrap_or(-1);
+                    self.status =
+                        format!("{} failed to start (exit code {code})", ctx.instance.name);
+                    self.append_launcher_log(
+                        &ctx.instance.path,
+                        &format!("[Launcher] Process exited immediately with code {code}"),
+                    );
+                    self.refresh_selected_content();
+                    return;
+                }
                 self.processes.insert(ctx.instance.path.clone(), child);
                 if let Some(post) = ctx.post_exit {
                     self.post_exit_commands
@@ -2804,7 +2819,7 @@ impl PrismarineApp {
                 } else {
                     self.post_exit_commands.remove(&ctx.instance.path);
                 }
-                self.status = format!("Launched {}", ctx.instance.name);
+                self.status = format!("{} is running", ctx.instance.name);
                 self.sync_process_states();
                 self.refresh_selected_content();
             }
@@ -3183,7 +3198,9 @@ impl PrismarineApp {
                 }
 
                 let selected = self.selected == Some(idx);
-                let status = if instance.running {
+                let status = if self.launch_in_progress.contains(&instance.path) {
+                    "preparing"
+                } else if instance.running {
                     "running"
                 } else {
                     "stopped"
@@ -4239,18 +4256,26 @@ impl App for PrismarineApp {
             .resizable(false)
             .default_width(180.0)
             .show(ctx, |ui| {
-                let has_selected = self.selected_instance().is_some();
+                let selected = self.selected_instance().cloned();
+                let has_selected = selected.is_some();
+                let is_preparing = selected
+                    .as_ref()
+                    .map(|i| self.launch_in_progress.contains(&i.path))
+                    .unwrap_or(false);
                 if ui
-                    .add_enabled(has_selected, egui::Button::new("Launch"))
+                    .add_enabled(has_selected && !is_preparing, egui::Button::new("Launch"))
                     .clicked()
                 {
                     self.do_launch_instance();
                 }
                 if ui
-                    .add_enabled(has_selected, egui::Button::new("Kill"))
+                    .add_enabled(has_selected && !is_preparing, egui::Button::new("Kill"))
                     .clicked()
                 {
                     self.do_kill_instance();
+                }
+                if is_preparing {
+                    ui.label("Preparing launch...");
                 }
                 ui.separator();
                 if ui
