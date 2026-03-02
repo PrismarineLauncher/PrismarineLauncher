@@ -6,7 +6,8 @@ use rust_core::{
     default_launch_profile, delete_instance, download_file_to_path, format_s3_time, list_logs,
     list_mod_files, load_launch_profile, load_prism_instance_config, modrinth_resolve_primary_file,
     modrinth_search_projects, parse_s3_time, read_log_preview, rename_instance,
-    save_launch_profile, scan_instances, start_microsoft_device_code, validate_minecraft_account,
+    save_launch_profile, scan_instances, start_microsoft_device_code, sync_modrinth_managed_mods,
+    validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -608,7 +609,7 @@ impl PrismarineApp {
         } else {
             self.curseforge_filename.trim().to_string()
         };
-        let target = instance_path.join("mods").join(&file_name);
+        let target = preferred_mods_dir(&instance_path).join(&file_name);
         match download_file_to_path(&url, &target) {
             Ok(_) => {
                 self.status = format!("Downloaded {} -> {}", file_name, target.display());
@@ -639,7 +640,7 @@ impl PrismarineApp {
 
         match modrinth_resolve_primary_file(&hit.project_id, version, loader) {
             Ok(file) => {
-                let target = instance_path.join("mods").join(&file.filename);
+                let target = preferred_mods_dir(&instance_path).join(&file.filename);
                 match download_file_to_path(&file.url, &target) {
                     Ok(_) => {
                         self.status =
@@ -653,6 +654,26 @@ impl PrismarineApp {
             }
             Err(err) => {
                 self.status = format!("Failed to resolve Modrinth file: {err}");
+            }
+        }
+    }
+
+    fn do_auto_update_mods(&mut self) {
+        let Some(instance_path) = self.selected_instance_path() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        match sync_modrinth_managed_mods(&instance_path) {
+            Ok(changed) => {
+                if changed > 0 {
+                    self.status = format!("Updated {changed} mods from managed Modrinth pack");
+                } else {
+                    self.status = "Managed Modrinth mods are up to date".to_string();
+                }
+                self.refresh_selected_content();
+            }
+            Err(err) => {
+                self.status = format!("Mod auto-update failed: {err}");
             }
         }
     }
@@ -1079,6 +1100,15 @@ impl PrismarineApp {
         }
 
         let instance_path = PathBuf::from(&instance.path);
+        match sync_modrinth_managed_mods(&instance_path) {
+            Ok(changed) if changed > 0 => {
+                self.status = format!("Updated {changed} mods before launch");
+            }
+            Ok(_) => {}
+            Err(err) => {
+                self.status = format!("Mod auto-update failed before launch: {err}");
+            }
+        }
         let prism_cfg = load_prism_instance_config(&instance_path).unwrap_or_default();
         let mut profile = self.launch_profile.clone();
         profile.java_path = self.global_settings.java_path.clone();
@@ -1545,6 +1575,9 @@ impl PrismarineApp {
         ui.horizontal(|ui| {
             if ui.button("Refresh Mods").clicked() {
                 self.refresh_selected_content();
+            }
+            if ui.button("Auto Update Mods").clicked() {
+                self.do_auto_update_mods();
             }
             if ui.button("Download Mods").clicked() {
                 self.show_download_panel = !self.show_download_panel;
@@ -2237,6 +2270,22 @@ fn percent_encode_query(input: &str) -> String {
         }
     }
     out
+}
+
+fn preferred_mods_dir(instance_path: &Path) -> PathBuf {
+    let candidates = [
+        instance_path.join("minecraft/mods"),
+        instance_path.join(".minecraft/mods"),
+        instance_path.join("mods"),
+    ];
+    for candidate in candidates {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    let fallback = instance_path.join("minecraft/mods");
+    let _ = fs::create_dir_all(&fallback);
+    fallback
 }
 
 fn load_state() -> Option<PersistedState> {

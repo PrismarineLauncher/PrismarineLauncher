@@ -1,8 +1,10 @@
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::ffi::{CStr, c_char};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -94,6 +96,11 @@ pub struct ModrinthDownloadFile {
 }
 
 pub fn default_launch_profile(instance_path: &Path) -> LaunchProfile {
+    let game_dir = if instance_path.join("minecraft").is_dir() {
+        instance_path.join("minecraft")
+    } else {
+        instance_path.to_path_buf()
+    };
     LaunchProfile {
         java_path: "java".to_string(),
         jvm_args: vec!["-Xms1G".to_string(), "-Xmx2G".to_string()],
@@ -101,7 +108,7 @@ pub fn default_launch_profile(instance_path: &Path) -> LaunchProfile {
         classpath: Vec::new(),
         game_args: vec![
             "--gameDir".to_string(),
-            instance_path.display().to_string(),
+            game_dir.display().to_string(),
             "--version".to_string(),
             "Prismarine".to_string(),
         ],
@@ -188,6 +195,12 @@ pub fn create_instance(root: &Path, name: &str) -> std::io::Result<InstanceSumma
     }
     let path = root.join(cleaned);
     fs::create_dir_all(path.join("mods"))?;
+    fs::create_dir_all(path.join("minecraft").join("mods"))?;
+    fs::create_dir_all(path.join("minecraft").join("resourcepacks"))?;
+    fs::create_dir_all(path.join("minecraft").join("shaderpacks"))?;
+    fs::create_dir_all(path.join("minecraft").join("saves"))?;
+    fs::create_dir_all(path.join("minecraft").join("config"))?;
+    fs::create_dir_all(path.join("mrpack"))?;
     fs::create_dir_all(path.join("logs"))?;
     fs::create_dir_all(path.join("saves"))?;
     fs::write(
@@ -270,7 +283,11 @@ pub fn rename_instance(path: &Path, new_name: &str) -> std::io::Result<PathBuf> 
 
 pub fn list_mod_files(instance_path: &Path) -> std::io::Result<Vec<String>> {
     let mut mods = Vec::new();
-    for mods_dir in [instance_path.join("mods"), instance_path.join(".minecraft/mods")] {
+    for mods_dir in [
+        instance_path.join("mods"),
+        instance_path.join(".minecraft/mods"),
+        instance_path.join("minecraft/mods"),
+    ] {
         if !mods_dir.exists() {
             continue;
         }
@@ -849,6 +866,84 @@ pub fn download_file_to_path(url: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct MrpackIndex {
+    files: Vec<MrpackFile>,
+}
+
+#[derive(Deserialize)]
+struct MrpackFile {
+    path: String,
+    hashes: Option<MrpackHashes>,
+    downloads: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct MrpackHashes {
+    sha1: Option<String>,
+}
+
+fn file_sha1_hex(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("open file for hashing failed: {e}"))?;
+    let mut sha = Sha1::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .map_err(|e| format!("read file for hashing failed: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        sha.update(&buf[..read]);
+    }
+    Ok(format!("{:x}", sha.finalize()))
+}
+
+pub fn sync_modrinth_managed_mods(instance_path: &Path) -> Result<usize, String> {
+    let index_path = instance_path.join("mrpack").join("modrinth.index.json");
+    if !index_path.exists() {
+        return Ok(0);
+    }
+    let text =
+        fs::read_to_string(&index_path).map_err(|e| format!("failed to read modrinth index: {e}"))?;
+    let index = serde_json::from_str::<MrpackIndex>(&text)
+        .map_err(|e| format!("failed to parse modrinth index: {e}"))?;
+
+    let mut updated = 0usize;
+    let game_root = instance_path.join("minecraft");
+    for item in index.files {
+        let rel = item.path.replace('\\', "/");
+        if !rel.starts_with("mods/") {
+            continue;
+        }
+        let target = game_root.join(&item.path);
+        let mut needs_download = !target.is_file();
+        if !needs_download
+            && let Some(expected) = item
+                .hashes
+                .as_ref()
+                .and_then(|h| h.sha1.as_ref())
+                .map(|x| x.to_ascii_lowercase())
+        {
+            let actual = file_sha1_hex(&target)?;
+            if actual != expected {
+                needs_download = true;
+            }
+        }
+        if !needs_download {
+            continue;
+        }
+
+        let url = item
+            .downloads
+            .first()
+            .ok_or_else(|| format!("mod index entry has no download URL: {}", item.path))?;
+        download_file_to_path(url, &target)?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn prismarine_parse_s3_time(
     input: *const c_char,
@@ -908,7 +1003,7 @@ mod tests {
         build_java_command, copy_instance, create_instance, default_launch_profile,
         delete_instance, format_s3_time, list_logs, list_mod_files, load_launch_profile,
         load_prism_instance_config, parse_s3_time, read_log_preview, rename_instance,
-        save_launch_profile, scan_instances,
+        save_launch_profile, scan_instances, sync_modrinth_managed_mods,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -980,10 +1075,22 @@ mod tests {
             b"jar",
         )
         .expect("write second mod");
+        fs::write(
+            created.path.join("minecraft/mods").join("third.jar"),
+            b"jar",
+        )
+        .expect("write third mod");
         fs::write(created.path.join("logs").join("latest.log"), b"hello log").expect("write log");
 
         let mods = list_mod_files(&created.path).expect("list mods");
-        assert_eq!(mods, vec!["another.jar".to_string(), "example.jar".to_string()]);
+        assert_eq!(
+            mods,
+            vec![
+                "another.jar".to_string(),
+                "example.jar".to_string(),
+                "third.jar".to_string()
+            ]
+        );
 
         let logs = list_logs(&created.path).expect("list logs");
         assert_eq!(logs.len(), 1);
@@ -1086,6 +1193,26 @@ WrapperCommand=echo wrap
         assert_eq!(cfg.pre_launch_command.as_deref(), Some("echo pre"));
         assert_eq!(cfg.post_exit_command.as_deref(), Some("echo post"));
         assert_eq!(cfg.wrapper_command.as_deref(), Some("echo wrap"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_modrinth_managed_mods_without_index_is_noop() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = PathBuf::from(format!(
+            "/tmp/prismarine_launcher_modsync_noop_test_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create root");
+
+        let changed = sync_modrinth_managed_mods(&root).expect("sync");
+        assert_eq!(changed, 0);
 
         let _ = fs::remove_dir_all(&root);
     }
