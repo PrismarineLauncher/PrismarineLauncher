@@ -5,8 +5,8 @@ use rust_core::{
     build_java_command, complete_microsoft_device_login, copy_instance, create_instance,
     default_launch_profile, delete_instance, download_file_to_path, format_s3_time, list_logs,
     list_mod_files, load_launch_profile, load_prism_instance_config, modrinth_resolve_primary_file,
-    modrinth_search_projects, parse_s3_time, read_log_preview, rename_instance, scan_instances,
-    start_microsoft_device_code, validate_minecraft_account,
+    modrinth_search_projects, parse_s3_time, read_log_preview, rename_instance,
+    save_launch_profile, scan_instances, start_microsoft_device_code, validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,6 +78,43 @@ enum DownloadProvider {
 impl Default for DownloadProvider {
     fn default() -> Self {
         Self::Modrinth
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CreateLoader {
+    Fabric,
+    Forge,
+    Quilt,
+    NeoForge,
+}
+
+impl CreateLoader {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Fabric => "Fabric",
+            Self::Forge => "Forge",
+            Self::Quilt => "Quilt",
+            Self::NeoForge => "Neo-Forge",
+        }
+    }
+
+    fn mmc_uid(&self) -> &'static str {
+        match self {
+            Self::Fabric => "net.fabricmc.fabric-loader",
+            Self::Forge => "net.minecraftforge",
+            Self::Quilt => "org.quiltmc.quilt-loader",
+            Self::NeoForge => "net.neoforged",
+        }
+    }
+
+    fn cfg_value(&self) -> &'static str {
+        match self {
+            Self::Fabric => "fabric",
+            Self::Forge => "forge",
+            Self::Quilt => "quilt",
+            Self::NeoForge => "neoforge",
+        }
     }
 }
 
@@ -220,6 +257,8 @@ struct PrismarineApp {
     active_tab: CenterTab,
     show_create_dialog: bool,
     create_name: String,
+    create_game_version: String,
+    create_loader: Option<CreateLoader>,
     show_rename_dialog: bool,
     rename_name: String,
     show_copy_dialog: bool,
@@ -290,6 +329,8 @@ impl Default for PrismarineApp {
             active_tab: persisted.active_tab,
             show_create_dialog: false,
             create_name: String::new(),
+            create_game_version: String::new(),
+            create_loader: None,
             show_rename_dialog: false,
             rename_name: String::new(),
             show_copy_dialog: false,
@@ -884,15 +925,67 @@ impl PrismarineApp {
 
     fn do_create_instance(&mut self) {
         let name = self.create_name.trim().to_string();
+        let game_version = self.create_game_version.trim().to_string();
+        let Some(loader) = self.create_loader.clone() else {
+            self.status = "Choose loader: Fabric / Forge / Quilt / Neo-Forge".to_string();
+            return;
+        };
         if name.is_empty() {
             self.status = "Instance name must not be empty".to_string();
             return;
         }
+        if game_version.is_empty() {
+            self.status = "Game version is required".to_string();
+            return;
+        }
         match create_instance(&self.instance_root(), &name) {
-            Ok(_) => {
-                self.status = format!("Created instance {name}");
+            Ok(created) => {
+                let cfg_text = format!(
+                    "# PrismarineLauncher instance\nIntendedVersion={}\nManagedLoader={}\n",
+                    game_version,
+                    loader.cfg_value()
+                );
+                if let Err(err) = fs::write(created.path.join("instance.cfg"), cfg_text) {
+                    self.status =
+                        format!("Created instance {name}, but failed to write cfg: {err}");
+                    return;
+                }
+
+                let mmc_pack = serde_json::json!({
+                    "formatVersion": 1,
+                    "components": [
+                        { "uid": "net.minecraft", "version": game_version },
+                        { "uid": loader.mmc_uid(), "version": "0.0.0" }
+                    ]
+                });
+                if let Err(err) = fs::write(
+                    created.path.join("mmc-pack.json"),
+                    serde_json::to_string_pretty(&mmc_pack).unwrap_or_else(|_| "{}".to_string()),
+                ) {
+                    self.status = format!(
+                        "Created instance {name}, but failed to write mmc-pack.json: {err}"
+                    );
+                    return;
+                }
+
+                let mut profile = default_launch_profile(&created.path);
+                upsert_arg_pair(&mut profile.game_args, "--version", game_version.as_str());
+                if let Err(err) = save_launch_profile(&created.path, &profile) {
+                    self.status = format!(
+                        "Created instance {name}, but failed to save launch profile: {err}"
+                    );
+                    return;
+                }
+
+                self.status = format!(
+                    "Created instance {name} [{} | {}]",
+                    game_version,
+                    loader.label()
+                );
                 self.show_create_dialog = false;
                 self.create_name.clear();
+                self.create_game_version.clear();
+                self.create_loader = None;
                 self.reload_instances();
             }
             Err(err) => {
@@ -1184,6 +1277,8 @@ impl PrismarineApp {
 
     fn open_create_dialog(&mut self) {
         self.create_name.clear();
+        self.create_game_version.clear();
+        self.create_loader = None;
         self.show_create_dialog = true;
     }
 
@@ -1806,6 +1901,38 @@ impl PrismarineApp {
                 .show(ctx, |ui| {
                     ui.label("Instance name:");
                     ui.text_edit_singleline(&mut self.create_name);
+                    ui.label("Game version (required):");
+                    ui.text_edit_singleline(&mut self.create_game_version);
+                    ui.label("Loader (required):");
+                    egui::ComboBox::from_id_salt("create_loader")
+                        .selected_text(
+                            self.create_loader
+                                .as_ref()
+                                .map(CreateLoader::label)
+                                .unwrap_or("Select loader"),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.create_loader,
+                                Some(CreateLoader::Fabric),
+                                "Fabric",
+                            );
+                            ui.selectable_value(
+                                &mut self.create_loader,
+                                Some(CreateLoader::Forge),
+                                "Forge",
+                            );
+                            ui.selectable_value(
+                                &mut self.create_loader,
+                                Some(CreateLoader::Quilt),
+                                "Quilt",
+                            );
+                            ui.selectable_value(
+                                &mut self.create_loader,
+                                Some(CreateLoader::NeoForge),
+                                "Neo-Forge",
+                            );
+                        });
                     ui.horizontal(|ui| {
                         if ui.button("Create").clicked() {
                             self.do_create_instance();
@@ -2140,6 +2267,19 @@ fn remove_arg_pair(args: &mut Vec<String>, key: &str) {
             i += 1;
         }
     }
+}
+
+fn upsert_arg_pair(args: &mut Vec<String>, key: &str, value: &str) {
+    let mut i = 0usize;
+    while i + 1 < args.len() {
+        if args[i] == key {
+            args[i + 1] = value.to_string();
+            return;
+        }
+        i += 1;
+    }
+    args.push(key.to_string());
+    args.push(value.to_string());
 }
 
 fn pseudo_uuid_from_name(name: &str) -> String {
