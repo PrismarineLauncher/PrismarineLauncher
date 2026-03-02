@@ -2570,14 +2570,20 @@ impl PrismarineApp {
                 profile.jvm_args.push(format!("-Xmx{}M", max_mb.max(256)));
             }
         }
-        if self.global_settings.permgen_mb > 0 {
+        let allow_permgen = java_supports_permgen(&profile.java_path);
+        if self.global_settings.permgen_mb > 0 && allow_permgen {
             profile
                 .jvm_args
                 .push(format!("-XX:PermSize={}M", self.global_settings.permgen_mb));
         }
-        if let Some(perm) = prism_cfg.perm_gen {
+        if let Some(perm) = prism_cfg.perm_gen
+            && allow_permgen
+        {
             profile.jvm_args.retain(|x| !x.starts_with("-XX:PermSize="));
             profile.jvm_args.push(format!("-XX:PermSize={}M", perm));
+        }
+        if !allow_permgen {
+            profile.jvm_args.retain(|x| !x.starts_with("-XX:PermSize="));
         }
         if prism_cfg.override_java_args
             && let Some(args) = prism_cfg.java_args.clone()
@@ -4394,6 +4400,43 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+
+fn java_supports_permgen(java_path: &str) -> bool {
+    let output = Command::new(java_path).arg("-version").output();
+    let Ok(output) = output else {
+        return false;
+    };
+    let mut text = String::from_utf8_lossy(&output.stderr).to_string();
+    if text.trim().is_empty() {
+        text = String::from_utf8_lossy(&output.stdout).to_string();
+    }
+    let Some(first_line) = text.lines().next() else {
+        return false;
+    };
+
+    let Some(start) = first_line.find('"') else {
+        return false;
+    };
+    let rest = &first_line[start + 1..];
+    let Some(end_rel) = rest.find('"') else {
+        return false;
+    };
+    let version = &rest[..end_rel];
+    let major = if let Some(stripped) = version.strip_prefix("1.") {
+        stripped
+            .split('.')
+            .next()
+            .and_then(|x| x.parse::<u32>().ok())
+            .unwrap_or(8)
+    } else {
+        version
+            .split('.')
+            .next()
+            .and_then(|x| x.parse::<u32>().ok())
+            .unwrap_or(17)
+    };
+    major <= 7
 }
 
 fn minecraft_head_icon_url(name: &str) -> String {
