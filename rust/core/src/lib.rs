@@ -1255,24 +1255,39 @@ pub fn modrinth_search_projects_by_type_paged(
         .map_err(|e| format!("failed to build http client: {e}"))?;
 
     let facets = format!("[[\"project_type:{project_type}\"]]");
-
-    let response = client
-        .get("https://api.modrinth.com/v2/search")
-        .query(&[
+    let mut parsed: Option<ModrinthSearchResponse> = None;
+    let sort_indices = [None, Some("downloads"), Some("updated"), Some("newest")];
+    let mut last_error = "unknown modrinth error".to_string();
+    for idx in sort_indices {
+        let mut req = client.get("https://api.modrinth.com/v2/search").query(&[
             ("query", q),
             ("limit", &limit.to_string()),
             ("offset", &offset.to_string()),
             ("facets", facets.as_str()),
-        ])
-        .send()
-        .map_err(|e| format!("modrinth search failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!("modrinth search returned {}", response.status()));
+        ]);
+        if let Some(index) = idx {
+            req = req.query(&[("index", index)]);
+        }
+        let response = req
+            .send()
+            .map_err(|e| format!("modrinth search failed: {e}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            last_error = format!("modrinth search returned {status}: {body}");
+            continue;
+        }
+        match response.json::<ModrinthSearchResponse>() {
+            Ok(p) => {
+                parsed = Some(p);
+                break;
+            }
+            Err(e) => {
+                last_error = format!("failed to parse modrinth search response: {e}");
+            }
+        }
     }
-
-    let parsed = response
-        .json::<ModrinthSearchResponse>()
-        .map_err(|e| format!("failed to parse modrinth search response: {e}"))?;
+    let parsed = parsed.ok_or(last_error)?;
     Ok(parsed
         .hits
         .into_iter()

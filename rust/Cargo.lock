@@ -3129,6 +3129,7 @@ dependencies = [
  "rust_core",
  "serde",
  "serde_json",
+ "zip",
 ]
 
 [[package]]

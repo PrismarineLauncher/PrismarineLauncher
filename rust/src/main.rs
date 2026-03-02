@@ -16,11 +16,13 @@ use rust_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::hash::{Hash, Hasher};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
+use zip::ZipArchive;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum CenterTab {
@@ -1774,6 +1776,125 @@ impl PrismarineApp {
                 return Some(candidate.display().to_string());
             }
         }
+        self.extract_mod_icon_from_archive(&mod_file)
+    }
+
+    fn extract_mod_icon_from_archive(&self, mod_file: &Path) -> Option<String> {
+        let file = fs::File::open(mod_file).ok()?;
+        let mut zip = ZipArchive::new(file).ok()?;
+
+        let mut icon_candidates: Vec<String> = Vec::new();
+
+        if let Ok(mut fabric) = zip.by_name("fabric.mod.json") {
+            let mut text = String::new();
+            if fabric.read_to_string(&mut text).is_ok()
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+                && let Some(icon) = json.get("icon")
+            {
+                if let Some(path) = icon.as_str() {
+                    icon_candidates.push(path.to_string());
+                } else if let Some(map) = icon.as_object() {
+                    let mut best_size = 0u32;
+                    let mut best_path = None::<String>;
+                    for (k, v) in map {
+                        if let Some(path) = v.as_str() {
+                            let size = k.parse::<u32>().unwrap_or(0);
+                            if size >= best_size {
+                                best_size = size;
+                                best_path = Some(path.to_string());
+                            }
+                        }
+                    }
+                    if let Some(path) = best_path {
+                        icon_candidates.push(path);
+                    }
+                }
+            }
+        }
+
+        if let Ok(mut quilt) = zip.by_name("quilt.mod.json") {
+            let mut text = String::new();
+            if quilt.read_to_string(&mut text).is_ok()
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+            {
+                if let Some(path) = json
+                    .get("quilt_loader")
+                    .and_then(|v| v.get("icon"))
+                    .and_then(|v| v.as_str())
+                {
+                    icon_candidates.push(path.to_string());
+                }
+                if let Some(path) = json
+                    .get("metadata")
+                    .and_then(|v| v.get("icon"))
+                    .and_then(|v| v.as_str())
+                {
+                    icon_candidates.push(path.to_string());
+                }
+            }
+        }
+
+        if let Ok(mut mods_toml) = zip.by_name("META-INF/mods.toml") {
+            let mut text = String::new();
+            if mods_toml.read_to_string(&mut text).is_ok() {
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("logoFile")
+                        && let Some((_, value)) = rest.split_once('=')
+                    {
+                        let path = value.trim().trim_matches('"').trim_matches('\'');
+                        if !path.is_empty() {
+                            icon_candidates.push(path.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if icon_candidates.is_empty() {
+            for fallback in ["icon.png", "assets/icon.png", "logo.png"] {
+                if zip.by_name(fallback).is_ok() {
+                    icon_candidates.push(fallback.to_string());
+                    break;
+                }
+            }
+        }
+
+        for icon_path in icon_candidates {
+            let mut entry = match zip.by_name(&icon_path) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let mut bytes = Vec::new();
+            if entry.read_to_end(&mut bytes).is_err() || bytes.is_empty() {
+                continue;
+            }
+            let ext = Path::new(&icon_path)
+                .extension()
+                .and_then(|x| x.to_str())
+                .filter(|x| !x.trim().is_empty())
+                .unwrap_or("png");
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            mod_file.display().to_string().hash(&mut hasher);
+            icon_path.hash(&mut hasher);
+            if let Ok(meta) = fs::metadata(mod_file)
+                && let Ok(modified) = meta.modified()
+                && let Ok(delta) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                delta.as_nanos().hash(&mut hasher);
+            }
+            let name = format!("{:016x}.{}", hasher.finish(), ext);
+            let cache_dir = self.data_root.join("cache").join("mod_icons");
+            let _ = fs::create_dir_all(&cache_dir);
+            let target = cache_dir.join(name);
+            if !target.is_file() {
+                let _ = fs::write(&target, &bytes);
+            }
+            if target.is_file() {
+                return Some(target.display().to_string());
+            }
+        }
+
         None
     }
 
