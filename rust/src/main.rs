@@ -338,11 +338,35 @@ enum DownloadDetailsEvent {
     },
 }
 
+#[derive(Clone, Debug)]
+enum LaunchWorkerEvent {
+    Status {
+        instance_path: String,
+        message: String,
+    },
+    Ready {
+        instance_path: String,
+        profile: LaunchProfile,
+    },
+    Error {
+        instance_path: String,
+        message: String,
+    },
+}
+
 #[derive(Clone, Debug, Default)]
 struct DownloadDetails {
     title: String,
     markdown: String,
     icon_url: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingLaunchContext {
+    instance: Instance,
+    pre_commands: Vec<String>,
+    env_vars: Vec<(String, String)>,
+    post_exit: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -476,6 +500,13 @@ struct PrismarineApp {
     download_queue_tx: Sender<DownloadQueueEvent>,
     download_queue_rx: Receiver<DownloadQueueEvent>,
     max_parallel_downloads: usize,
+    launch_worker_tx: Sender<LaunchWorkerEvent>,
+    launch_worker_rx: Receiver<LaunchWorkerEvent>,
+    launch_in_progress: HashSet<String>,
+    pending_launches: HashMap<String, PendingLaunchContext>,
+    create_versions_loading: bool,
+    create_versions: Vec<String>,
+    create_versions_receiver: Option<Receiver<Result<Vec<String>, String>>>,
 }
 
 impl Default for PrismarineApp {
@@ -503,6 +534,7 @@ impl Default for PrismarineApp {
             ];
         }
         let (download_queue_tx, download_queue_rx) = mpsc::channel::<DownloadQueueEvent>();
+        let (launch_worker_tx, launch_worker_rx) = mpsc::channel::<LaunchWorkerEvent>();
         let mut app = Self {
             instances: Vec::new(),
             accounts,
@@ -573,6 +605,13 @@ impl Default for PrismarineApp {
             download_queue_tx,
             download_queue_rx,
             max_parallel_downloads: 2,
+            launch_worker_tx,
+            launch_worker_rx,
+            launch_in_progress: HashSet::new(),
+            pending_launches: HashMap::new(),
+            create_versions_loading: false,
+            create_versions: Vec::new(),
+            create_versions_receiver: None,
         };
         app.reload_instances();
         app
@@ -2427,17 +2466,12 @@ impl PrismarineApp {
             self.status = format!("{} is already running", instance.name);
             return;
         }
+        if self.launch_in_progress.contains(&instance.path) {
+            self.status = format!("{} launch is already preparing", instance.name);
+            return;
+        }
 
         let instance_path = PathBuf::from(&instance.path);
-        match sync_modrinth_managed_mods(&instance_path) {
-            Ok(changed) if changed > 0 => {
-                self.status = format!("Updated {changed} mods before launch");
-            }
-            Ok(_) => {}
-            Err(err) => {
-                self.status = format!("Mod auto-update failed before launch: {err}");
-            }
-        }
         let prism_cfg = load_prism_instance_config(&instance_path).unwrap_or_default();
         let mut profile = self.launch_profile.clone();
         profile.java_path = self.global_settings.java_path.clone();
@@ -2490,23 +2524,131 @@ impl PrismarineApp {
         if profile.working_dir.trim().is_empty() {
             profile.working_dir = instance.path.clone();
         }
+        self.apply_account_launch_args(&mut profile.game_args);
+
+        let pre_commands: Vec<String> = if prism_cfg.override_commands {
+            prism_cfg.pre_launch_command.into_iter().collect()
+        } else {
+            self.global_settings
+                .user_commands
+                .lines()
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        };
+        let env_vars: Vec<(String, String)> = self
+            .global_settings
+            .environment_vars
+            .lines()
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .filter_map(|line| line.split_once('='))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .collect();
+        let post_exit = if prism_cfg.override_commands {
+            prism_cfg
+                .post_exit_command
+                .clone()
+                .filter(|x| !x.trim().is_empty())
+        } else {
+            None
+        };
         let instance_version = self.detect_instance_version(&instance_path);
         let instance_loader = self.detect_instance_loader(&instance_path);
         let should_prepare_runtime = instance_version != "unknown"
             && (instance_loader.is_empty() || profile.classpath.is_empty());
-        if should_prepare_runtime {
-            self.status = format!("Preparing Minecraft runtime {}...", instance_version);
-            if let Err(err) = ensure_minecraft_runtime(
-                &self.data_root,
-                &instance_path,
-                &instance_version,
-                &mut profile,
-            ) {
-                self.status = format!("Failed to prepare Minecraft runtime: {err}");
-                return;
+
+        self.pending_launches.insert(
+            instance.path.clone(),
+            PendingLaunchContext {
+                instance: instance.clone(),
+                pre_commands,
+                env_vars,
+                post_exit,
+            },
+        );
+        self.launch_in_progress.insert(instance.path.clone());
+        self.status = format!("Preparing launch for {}...", instance.name);
+
+        let tx = self.launch_worker_tx.clone();
+        let data_root = self.data_root.clone();
+        let instance_path_copy = instance_path.clone();
+        let instance_key = instance.path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(LaunchWorkerEvent::Status {
+                instance_path: instance_key.clone(),
+                message: "Preparing launch: checking managed mods...".to_string(),
+            });
+            if let Err(err) = sync_modrinth_managed_mods(&instance_path_copy) {
+                let _ = tx.send(LaunchWorkerEvent::Status {
+                    instance_path: instance_key.clone(),
+                    message: format!("Mod auto-update warning: {err}"),
+                });
+            }
+            if should_prepare_runtime {
+                let _ = tx.send(LaunchWorkerEvent::Status {
+                    instance_path: instance_key.clone(),
+                    message: format!(
+                        "Preparing Minecraft runtime {} (downloading files)...",
+                        instance_version
+                    ),
+                });
+                if let Err(err) = ensure_minecraft_runtime(
+                    &data_root,
+                    &instance_path_copy,
+                    &instance_version,
+                    &mut profile,
+                ) {
+                    let _ = tx.send(LaunchWorkerEvent::Error {
+                        instance_path: instance_key,
+                        message: format!("Failed to prepare Minecraft runtime: {err}"),
+                    });
+                    return;
+                }
+            }
+            let _ = tx.send(LaunchWorkerEvent::Ready {
+                instance_path: instance_key,
+                profile,
+            });
+        });
+    }
+
+    fn poll_launch_worker_events(&mut self) {
+        loop {
+            let Ok(event) = self.launch_worker_rx.try_recv() else {
+                break;
+            };
+            match event {
+                LaunchWorkerEvent::Status {
+                    instance_path: _instance_path,
+                    message,
+                } => {
+                    self.status = message;
+                }
+                LaunchWorkerEvent::Error {
+                    instance_path,
+                    message,
+                } => {
+                    self.launch_in_progress.remove(&instance_path);
+                    self.pending_launches.remove(&instance_path);
+                    self.status = message;
+                }
+                LaunchWorkerEvent::Ready {
+                    instance_path,
+                    profile,
+                } => {
+                    self.launch_in_progress.remove(&instance_path);
+                    if let Some(ctx) = self.pending_launches.remove(&instance_path) {
+                        self.spawn_prepared_instance(ctx, profile);
+                    }
+                }
             }
         }
-        self.apply_account_launch_args(&mut profile.game_args);
+    }
+
+    fn spawn_prepared_instance(&mut self, ctx: PendingLaunchContext, profile: LaunchProfile) {
+        let instance_path = PathBuf::from(&ctx.instance.path);
         let (exe, args) = build_java_command(&profile);
 
         let logs_dir = instance_path.join("logs");
@@ -2523,7 +2665,13 @@ impl PrismarineApp {
                 return;
             }
         };
-        let _ = writeln!(log_file, "=== launch: {} {} ===", exe, args.join(" "));
+        let _ = writeln!(
+            log_file,
+            "[Launcher] Starting instance {}\n[Launcher] Command: {} {}",
+            ctx.instance.name,
+            exe,
+            args.join(" ")
+        );
         let stdout_log = match log_file.try_clone() {
             Ok(f) => f,
             Err(err) => {
@@ -2540,82 +2688,38 @@ impl PrismarineApp {
         };
 
         let working_dir = PathBuf::from(&profile.working_dir);
-        let pre_commands: Vec<String> = if prism_cfg.override_commands {
-            prism_cfg.pre_launch_command.into_iter().collect()
-        } else {
-            self.global_settings
-                .user_commands
-                .lines()
-                .map(str::trim)
-                .filter(|x| !x.is_empty())
-                .map(ToString::to_string)
-                .collect()
-        };
-
-        for cmd_line in pre_commands {
+        for cmd_line in ctx.pre_commands {
+            let _ = writeln!(log_file, "[Launcher] Pre-Launch: {}", cmd_line);
             let _ = Command::new("sh")
                 .arg("-lc")
                 .arg(cmd_line)
                 .current_dir(&working_dir)
                 .status();
         }
-        let launch_line = format!(
-            "{} {}",
-            shell_escape(&exe),
-            args.iter()
-                .map(|a| shell_escape(a))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
 
-        let mut cmd = if prism_cfg.override_commands {
-            if let Some(wrapper) = prism_cfg.wrapper_command {
-                let mut c = Command::new("sh");
-                c.arg("-lc").arg(format!("{wrapper} {launch_line}"));
-                c
-            } else {
-                let mut c = Command::new(exe);
-                c.args(args);
-                c
-            }
-        } else {
-            let mut c = Command::new(exe);
-            c.args(args);
-            c
-        };
-
-        if prism_cfg.override_commands
-            && let Some(post) = prism_cfg.post_exit_command.clone()
-            && !post.trim().is_empty()
-        {
-            self.post_exit_commands.insert(instance.path.clone(), post);
-        } else {
-            self.post_exit_commands.remove(&instance.path);
-        }
-
+        let mut cmd = Command::new(exe);
+        cmd.args(args);
         cmd.current_dir(working_dir)
             .stdout(Stdio::from(stdout_log))
             .stderr(Stdio::from(stderr_log));
-        for line in self
-            .global_settings
-            .environment_vars
-            .lines()
-            .map(str::trim)
-            .filter(|x| !x.is_empty())
-        {
-            if let Some((k, v)) = line.split_once('=') {
-                cmd.env(k.trim(), v.trim());
-            }
+        for (k, v) in ctx.env_vars {
+            cmd.env(k, v);
         }
 
         match cmd.spawn() {
             Ok(child) => {
-                self.processes.insert(instance.path.clone(), child);
-                self.status = format!("Launched {}", instance.name);
+                self.processes.insert(ctx.instance.path.clone(), child);
+                if let Some(post) = ctx.post_exit {
+                    self.post_exit_commands
+                        .insert(ctx.instance.path.clone(), post);
+                } else {
+                    self.post_exit_commands.remove(&ctx.instance.path);
+                }
+                self.status = format!("Launched {}", ctx.instance.name);
                 self.sync_process_states();
             }
             Err(err) => {
-                self.status = format!("Failed to launch {}: {}", instance.name, err);
+                self.status = format!("Failed to launch {}: {}", ctx.instance.name, err);
             }
         }
     }
@@ -2656,7 +2760,76 @@ impl PrismarineApp {
         self.create_game_version.clear();
         self.create_loader = None;
         self.create_import_path.clear();
+        self.request_create_versions();
         self.show_create_dialog = true;
+    }
+
+    fn request_create_versions(&mut self) {
+        if self.create_versions_loading {
+            return;
+        }
+        let (tx, rx) = mpsc::channel::<Result<Vec<String>, String>>();
+        self.create_versions_receiver = Some(rx);
+        self.create_versions_loading = true;
+        std::thread::spawn(move || {
+            let client = reqwest::blocking::Client::builder()
+                .user_agent("PrismarineLauncher-Rust")
+                .build()
+                .map_err(|e| format!("failed to build http client: {e}"));
+            let result = (|| -> Result<Vec<String>, String> {
+                let client = client?;
+                let response = client
+                    .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+                    .send()
+                    .map_err(|e| format!("failed to fetch version manifest: {e}"))?;
+                if !response.status().is_success() {
+                    return Err(format!("version manifest returned {}", response.status()));
+                }
+                let json = response
+                    .json::<serde_json::Value>()
+                    .map_err(|e| format!("failed to parse version manifest: {e}"))?;
+                let mut releases = Vec::new();
+                let mut others = Vec::new();
+                if let Some(arr) = json.get("versions").and_then(|x| x.as_array()) {
+                    for item in arr {
+                        let Some(id) = item.get("id").and_then(|x| x.as_str()) else {
+                            continue;
+                        };
+                        let kind = item
+                            .get("type")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("release");
+                        if kind == "release" {
+                            releases.push(id.to_string());
+                        } else {
+                            others.push(id.to_string());
+                        }
+                    }
+                }
+                releases.extend(others.into_iter().take(60));
+                Ok(releases.into_iter().take(180).collect())
+            })();
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_create_versions(&mut self) {
+        let Some(rx) = self.create_versions_receiver.as_ref() else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        self.create_versions_loading = false;
+        self.create_versions_receiver = None;
+        match result {
+            Ok(list) => {
+                self.create_versions = list;
+            }
+            Err(err) => {
+                self.status = format!("Failed to load Minecraft versions: {err}");
+            }
+        }
     }
 
     fn open_rename_dialog(&mut self) {
@@ -3603,7 +3776,41 @@ impl PrismarineApp {
                         match self.create_mode {
                             CreateMode::Custom => {
                                 cols[1].label("Версия (обязательно):");
-                                cols[1].text_edit_singleline(&mut self.create_game_version);
+                                let _ =
+                                    cols[1].text_edit_singleline(&mut self.create_game_version);
+                                cols[1].horizontal(|ui| {
+                                    if self.create_versions_loading {
+                                        ui.label("Загрузка списка версий...");
+                                    } else {
+                                        ui.label("Подсказки версий:");
+                                    }
+                                    if ui.button("Обновить").clicked() {
+                                        self.request_create_versions();
+                                    }
+                                });
+                                let needle = self.create_game_version.to_lowercase();
+                                let filtered: Vec<String> = self
+                                    .create_versions
+                                    .iter()
+                                    .filter(|v| {
+                                        needle.is_empty()
+                                            || v.to_lowercase().starts_with(&needle)
+                                            || v.to_lowercase().contains(&needle)
+                                    })
+                                    .take(8)
+                                    .cloned()
+                                    .collect();
+                                if !filtered.is_empty() {
+                                    egui::ScrollArea::vertical()
+                                        .max_height(120.0)
+                                        .show(&mut cols[1], |ui| {
+                                            for version in filtered {
+                                                if ui.selectable_label(false, &version).clicked() {
+                                                    self.create_game_version = version;
+                                                }
+                                            }
+                                        });
+                                }
                                 cols[1].label("Загрузчик модов (обязательно):");
                                 egui::ComboBox::from_id_salt("create_loader")
                                     .selected_text(
@@ -3819,6 +4026,8 @@ impl App for PrismarineApp {
         self.poll_download_search_events();
         self.poll_download_details_events();
         self.poll_download_queue_events();
+        self.poll_launch_worker_events();
+        self.poll_create_versions();
         self.process_download_queue();
 
         if let Some(deadline) = self.download_search_debounce_deadline
@@ -3842,6 +4051,8 @@ impl App for PrismarineApp {
                     || j.state == DownloadJobState::Resolving
                     || j.state == DownloadJobState::Downloading
             })
+            || !self.launch_in_progress.is_empty()
+            || self.create_versions_loading
         {
             ctx.request_repaint_after(Duration::from_millis(16));
         }

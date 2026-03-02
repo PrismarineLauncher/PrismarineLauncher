@@ -3125,6 +3125,7 @@ dependencies = [
  "egui_commonmark",
  "image",
  "qrcode",
+ "reqwest",
  "rfd",
  "rust_core",
  "serde",
