@@ -74,6 +74,7 @@ struct Instance {
     version: String,
     running: bool,
     path: String,
+    icon_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -214,6 +215,8 @@ struct PrismarineApp {
     selected_modrinth_hit: Option<usize>,
     global_settings: GlobalLaunchSettings,
     settings_subtab: SettingsSubTab,
+    icon_cache: HashMap<String, egui::TextureHandle>,
+    post_exit_commands: HashMap<String, String>,
 }
 
 impl Default for PrismarineApp {
@@ -273,6 +276,8 @@ impl Default for PrismarineApp {
             selected_modrinth_hit: None,
             global_settings: load_global_settings(),
             settings_subtab: SettingsSubTab::General,
+            icon_cache: HashMap::new(),
+            post_exit_commands: HashMap::new(),
         };
         app.reload_instances();
         app
@@ -282,6 +287,47 @@ impl Default for PrismarineApp {
 impl PrismarineApp {
     fn selected_instance(&self) -> Option<&Instance> {
         self.selected.and_then(|i| self.instances.get(i))
+    }
+
+    fn active_account(&self) -> Option<&Account> {
+        self.accounts.iter().find(|x| x.active)
+    }
+
+    fn apply_account_launch_args(&self, game_args: &mut Vec<String>) {
+        remove_arg_pair(game_args, "--username");
+        remove_arg_pair(game_args, "--uuid");
+        remove_arg_pair(game_args, "--accessToken");
+        remove_arg_pair(game_args, "--userType");
+        remove_arg_pair(game_args, "--versionType");
+
+        let account = self.active_account().cloned().unwrap_or(Account {
+            name: "Player".to_string(),
+            active: true,
+            account_type: AccountType::Offline,
+            access_token: None,
+            licensed: false,
+        });
+        let username = account.name;
+        let uuid = pseudo_uuid_from_name(&username);
+        let (access_token, user_type) = if account.account_type == AccountType::Licensed {
+            (
+                account.access_token.unwrap_or_else(|| "0".to_string()),
+                "msa".to_string(),
+            )
+        } else {
+            ("0".to_string(), "offline".to_string())
+        };
+
+        game_args.push("--username".to_string());
+        game_args.push(username);
+        game_args.push("--uuid".to_string());
+        game_args.push(uuid);
+        game_args.push("--accessToken".to_string());
+        game_args.push(access_token);
+        game_args.push("--userType".to_string());
+        game_args.push(user_type);
+        game_args.push("--versionType".to_string());
+        game_args.push("release".to_string());
     }
 
     fn selected_instance_path(&self) -> Option<PathBuf> {
@@ -415,11 +461,23 @@ impl PrismarineApp {
             Ok(items) => {
                 self.instances = items
                     .into_iter()
-                    .map(|item| Instance {
-                        name: item.name,
-                        version: "unknown".to_string(),
-                        running: false,
-                        path: item.path.display().to_string(),
+                    .map(|item| {
+                        let icon_a = item.path.join("icon.png");
+                        let icon_b = item.path.join(".minecraft").join("icon.png");
+                        let icon_path = if icon_a.is_file() {
+                            Some(icon_a.display().to_string())
+                        } else if icon_b.is_file() {
+                            Some(icon_b.display().to_string())
+                        } else {
+                            None
+                        };
+                        Instance {
+                            name: item.name,
+                            version: "unknown".to_string(),
+                            running: false,
+                            path: item.path.display().to_string(),
+                            icon_path,
+                        }
                     })
                     .collect();
                 if self.instances.is_empty() {
@@ -499,6 +557,13 @@ impl PrismarineApp {
         }
         for key in finished {
             self.processes.remove(&key);
+            if let Some(post) = self.post_exit_commands.remove(&key) {
+                let _ = Command::new("sh")
+                    .arg("-lc")
+                    .arg(post)
+                    .current_dir(&key)
+                    .status();
+            }
         }
         for instance in &mut self.instances {
             instance.running = self.processes.contains_key(&instance.path);
@@ -661,6 +726,7 @@ impl PrismarineApp {
         if profile.working_dir.trim().is_empty() {
             profile.working_dir = instance.path.clone();
         }
+        self.apply_account_launch_args(&mut profile.game_args);
         let (exe, args) = build_java_command(&profile);
 
         let logs_dir = instance_path.join("logs");
@@ -738,6 +804,15 @@ impl PrismarineApp {
             c
         };
 
+        if prism_cfg.override_commands
+            && let Some(post) = prism_cfg.post_exit_command.clone()
+            && !post.trim().is_empty()
+        {
+            self.post_exit_commands.insert(instance.path.clone(), post);
+        } else {
+            self.post_exit_commands.remove(&instance.path);
+        }
+
         cmd.current_dir(working_dir)
             .stdout(Stdio::from(stdout_log))
             .stderr(Stdio::from(stderr_log));
@@ -775,6 +850,13 @@ impl PrismarineApp {
             match child.kill() {
                 Ok(_) => {
                     let _ = child.wait();
+                    if let Some(post) = self.post_exit_commands.remove(&instance.path) {
+                        let _ = Command::new("sh")
+                            .arg("-lc")
+                            .arg(post)
+                            .current_dir(&instance.path)
+                            .status();
+                    }
                     self.status = format!("Stopped {}", instance.name);
                 }
                 Err(err) => {
@@ -783,6 +865,7 @@ impl PrismarineApp {
             }
         } else {
             self.status = format!("{} is not running", instance.name);
+            self.post_exit_commands.remove(&instance.path);
         }
         self.sync_process_states();
     }
@@ -911,7 +994,33 @@ impl PrismarineApp {
         });
     }
 
-    fn draw_instance_list(&mut self, ui: &mut egui::Ui) {
+    fn ensure_icon_texture(
+        &mut self,
+        ctx: &egui::Context,
+        icon_path: &str,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(tex) = self.icon_cache.get(icon_path) {
+            return Some(tex.clone());
+        }
+
+        let bytes = fs::read(icon_path).ok()?;
+        let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
+        let size = [decoded.width() as usize, decoded.height() as usize];
+        if size[0] == 0 || size[1] == 0 {
+            return None;
+        }
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+        let texture = ctx.load_texture(
+            format!("instance_icon::{icon_path}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.icon_cache
+            .insert(icon_path.to_string(), texture.clone());
+        Some(texture)
+    }
+
+    fn draw_instance_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label("Filter:");
             ui.text_edit_singleline(&mut self.filter);
@@ -919,7 +1028,8 @@ impl PrismarineApp {
         ui.separator();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for (idx, instance) in self.instances.iter().enumerate() {
+            for idx in 0..self.instances.len() {
+                let instance = self.instances[idx].clone();
                 if !self.filter.is_empty()
                     && !instance
                         .name
@@ -936,9 +1046,21 @@ impl PrismarineApp {
                     "stopped"
                 };
                 let line = format!("{} [{} | {}]", instance.name, instance.version, status);
-                if ui.selectable_label(selected, line).clicked() {
-                    self.selected = Some(idx);
-                }
+                let row_height = ui.text_style_height(&egui::TextStyle::Body).max(18.0);
+                ui.horizontal(|ui| {
+                    if let Some(icon_path) = &instance.icon_path {
+                        if let Some(tex) = self.ensure_icon_texture(ctx, icon_path) {
+                            ui.image((tex.id(), egui::vec2(row_height, row_height)));
+                        } else {
+                            ui.add_space(row_height);
+                        }
+                    } else {
+                        ui.add_space(row_height);
+                    }
+                    if ui.selectable_label(selected, line).clicked() {
+                        self.selected = Some(idx);
+                    }
+                });
             }
         });
     }
@@ -1434,7 +1556,7 @@ impl App for PrismarineApp {
             ui.columns(2, |cols| {
                 cols[0].heading("Instances");
                 cols[0].separator();
-                self.draw_instance_list(&mut cols[0]);
+                self.draw_instance_list(&mut cols[0], ctx);
 
                 cols[1].heading("Instance Details");
                 cols[1].separator();
@@ -1475,6 +1597,38 @@ fn shell_escape(input: &str) -> String {
     }
     let escaped = input.replace('\'', "'\"'\"'");
     format!("'{escaped}'")
+}
+
+fn remove_arg_pair(args: &mut Vec<String>, key: &str) {
+    let mut i = 0usize;
+    while i < args.len() {
+        if args[i] == key {
+            args.remove(i);
+            if i < args.len() {
+                args.remove(i);
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn pseudo_uuid_from_name(name: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h1);
+    let a = h1.finish();
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    format!("{}::prismarine", name).hash(&mut h2);
+    let b = h2.finish();
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        (a >> 32) as u32,
+        (a >> 16) as u16,
+        a as u16,
+        (b >> 48) as u16,
+        (b & 0x0000_FFFF_FFFF_FFFF) as u64
+    )
 }
 
 fn load_accounts() -> Vec<Account> {
