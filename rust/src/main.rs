@@ -3,8 +3,9 @@ use eframe::{App, Frame, NativeOptions, egui};
 use rust_core::{
     LaunchProfile, ModrinthSearchHit, build_java_command, copy_instance, create_instance,
     default_launch_profile, delete_instance, download_file_to_path, format_s3_time, list_logs,
-    list_mod_files, load_launch_profile, modrinth_resolve_primary_file, modrinth_search_projects,
-    parse_s3_time, read_log_preview, rename_instance, scan_instances, validate_minecraft_account,
+    list_mod_files, load_launch_profile, load_prism_instance_config, modrinth_resolve_primary_file,
+    modrinth_search_projects, parse_s3_time, read_log_preview, rename_instance, scan_instances,
+    validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -608,6 +609,7 @@ impl PrismarineApp {
         }
 
         let instance_path = PathBuf::from(&instance.path);
+        let prism_cfg = load_prism_instance_config(&instance_path).unwrap_or_default();
         let mut profile = self.launch_profile.clone();
         profile.java_path = self.global_settings.java_path.clone();
         match self.global_settings.mode {
@@ -627,10 +629,34 @@ impl PrismarineApp {
                     .collect();
             }
         }
+        if prism_cfg.override_memory {
+            if let Some(min_mb) = prism_cfg.min_mem_alloc {
+                profile.jvm_args.retain(|x| !x.starts_with("-Xms"));
+                profile.jvm_args.push(format!("-Xms{}M", min_mb.max(256)));
+            }
+            if let Some(max_mb) = prism_cfg.max_mem_alloc {
+                profile.jvm_args.retain(|x| !x.starts_with("-Xmx"));
+                profile.jvm_args.push(format!("-Xmx{}M", max_mb.max(256)));
+            }
+        }
         if self.global_settings.permgen_mb > 0 {
             profile
                 .jvm_args
                 .push(format!("-XX:PermSize={}M", self.global_settings.permgen_mb));
+        }
+        if let Some(perm) = prism_cfg.perm_gen {
+            profile.jvm_args.retain(|x| !x.starts_with("-XX:PermSize="));
+            profile.jvm_args.push(format!("-XX:PermSize={}M", perm));
+        }
+        if prism_cfg.override_java_args
+            && let Some(args) = prism_cfg.java_args.clone()
+        {
+            profile.jvm_args = args.split_whitespace().map(ToString::to_string).collect();
+        }
+        if prism_cfg.override_java_location
+            && let Some(java) = prism_cfg.java_path.clone()
+        {
+            profile.java_path = java;
         }
         if profile.working_dir.trim().is_empty() {
             profile.working_dir = instance.path.clone();
@@ -668,22 +694,51 @@ impl PrismarineApp {
         };
 
         let working_dir = PathBuf::from(&profile.working_dir);
-        for cmd_line in self
-            .global_settings
-            .user_commands
-            .lines()
-            .map(str::trim)
-            .filter(|x| !x.is_empty())
-        {
+        let pre_commands: Vec<String> = if prism_cfg.override_commands {
+            prism_cfg.pre_launch_command.into_iter().collect()
+        } else {
+            self.global_settings
+                .user_commands
+                .lines()
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        };
+
+        for cmd_line in pre_commands {
             let _ = Command::new("sh")
                 .arg("-lc")
                 .arg(cmd_line)
                 .current_dir(&working_dir)
                 .status();
         }
-        let mut cmd = Command::new(exe);
-        cmd.args(args)
-            .current_dir(working_dir)
+        let launch_line = format!(
+            "{} {}",
+            shell_escape(&exe),
+            args.iter()
+                .map(|a| shell_escape(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let mut cmd = if prism_cfg.override_commands {
+            if let Some(wrapper) = prism_cfg.wrapper_command {
+                let mut c = Command::new("sh");
+                c.arg("-lc").arg(format!("{wrapper} {launch_line}"));
+                c
+            } else {
+                let mut c = Command::new(exe);
+                c.args(args);
+                c
+            }
+        } else {
+            let mut c = Command::new(exe);
+            c.args(args);
+            c
+        };
+
+        cmd.current_dir(working_dir)
             .stdout(Stdio::from(stdout_log))
             .stderr(Stdio::from(stderr_log));
         for line in self
@@ -1409,6 +1464,17 @@ impl App for PrismarineApp {
 fn load_state() -> Option<PersistedState> {
     let text = fs::read_to_string(state_file_path()).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn shell_escape(input: &str) -> String {
+    if input
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_./:=+".contains(c))
+    {
+        return input.to_string();
+    }
+    let escaped = input.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 fn load_accounts() -> Vec<Account> {

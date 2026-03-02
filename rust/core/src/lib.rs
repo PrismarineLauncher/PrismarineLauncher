@@ -36,6 +36,22 @@ pub struct LaunchProfile {
     pub working_dir: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrismInstanceConfig {
+    pub override_java_location: bool,
+    pub java_path: Option<String>,
+    pub override_java_args: bool,
+    pub java_args: Option<String>,
+    pub override_memory: bool,
+    pub min_mem_alloc: Option<u32>,
+    pub max_mem_alloc: Option<u32>,
+    pub perm_gen: Option<u32>,
+    pub override_commands: bool,
+    pub pre_launch_command: Option<String>,
+    pub post_exit_command: Option<String>,
+    pub wrapper_command: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountValidation {
     pub username: String,
@@ -277,6 +293,53 @@ pub fn read_log_preview(path: &Path, max_chars: usize) -> std::io::Result<String
         return Ok(text);
     }
     Ok(text.chars().take(max_chars).collect())
+}
+
+pub fn load_prism_instance_config(instance_path: &Path) -> std::io::Result<PrismInstanceConfig> {
+    let cfg_path = instance_path.join("instance.cfg");
+    if !cfg_path.exists() {
+        return Ok(PrismInstanceConfig::default());
+    }
+
+    let mut cfg = PrismInstanceConfig::default();
+    let content = fs::read_to_string(cfg_path)?;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let value = v.trim();
+        if value.is_empty() {
+            continue;
+        }
+
+        match key {
+            "OverrideJavaLocation" => cfg.override_java_location = parse_bool_cfg(value),
+            "JavaPath" => cfg.java_path = Some(value.to_string()),
+            "OverrideJavaArgs" => cfg.override_java_args = parse_bool_cfg(value),
+            "JvmArgs" | "JavaArgs" => cfg.java_args = Some(value.to_string()),
+            "OverrideMemory" => cfg.override_memory = parse_bool_cfg(value),
+            "MinMemAlloc" => cfg.min_mem_alloc = value.parse::<u32>().ok(),
+            "MaxMemAlloc" => cfg.max_mem_alloc = value.parse::<u32>().ok(),
+            "PermGen" => cfg.perm_gen = value.parse::<u32>().ok(),
+            "OverrideCommands" => cfg.override_commands = parse_bool_cfg(value),
+            "PreLaunchCommand" => cfg.pre_launch_command = Some(value.to_string()),
+            "PostExitCommand" => cfg.post_exit_command = Some(value.to_string()),
+            "WrapperCommand" => cfg.wrapper_command = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    Ok(cfg)
+}
+
+fn parse_bool_cfg(v: &str) -> bool {
+    matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
 pub fn launch_profile_path(instance_path: &Path) -> PathBuf {
@@ -571,7 +634,8 @@ mod tests {
     use super::{
         build_java_command, copy_instance, create_instance, default_launch_profile,
         delete_instance, format_s3_time, list_logs, list_mod_files, load_launch_profile,
-        parse_s3_time, read_log_preview, rename_instance, save_launch_profile, scan_instances,
+        load_prism_instance_config, parse_s3_time, read_log_preview, rename_instance,
+        save_launch_profile, scan_instances,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -690,6 +754,55 @@ mod tests {
         assert!(args.iter().any(|x| x == "-cp"));
         assert!(args.iter().any(|x| x == "com.example.Main"));
         assert!(args.iter().any(|x| x == "--demo"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prism_instance_cfg_is_parsed() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = PathBuf::from(format!(
+            "/tmp/prismarine_launcher_cfg_test_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create root");
+
+        fs::write(
+            root.join("instance.cfg"),
+            "\
+OverrideJavaLocation=true
+JavaPath=/usr/bin/java
+OverrideJavaArgs=true
+JvmArgs=-Xms512m -Xmx4096m
+OverrideMemory=true
+MinMemAlloc=512
+MaxMemAlloc=4096
+PermGen=128
+OverrideCommands=true
+PreLaunchCommand=echo pre
+PostExitCommand=echo post
+WrapperCommand=echo wrap
+",
+        )
+        .expect("write cfg");
+
+        let cfg = load_prism_instance_config(&root).expect("parse cfg");
+        assert!(cfg.override_java_location);
+        assert_eq!(cfg.java_path.as_deref(), Some("/usr/bin/java"));
+        assert!(cfg.override_java_args);
+        assert!(cfg.override_memory);
+        assert_eq!(cfg.min_mem_alloc, Some(512));
+        assert_eq!(cfg.max_mem_alloc, Some(4096));
+        assert_eq!(cfg.perm_gen, Some(128));
+        assert!(cfg.override_commands);
+        assert_eq!(cfg.pre_launch_command.as_deref(), Some("echo pre"));
+        assert_eq!(cfg.post_exit_command.as_deref(), Some("echo post"));
+        assert_eq!(cfg.wrapper_command.as_deref(), Some("echo wrap"));
 
         let _ = fs::remove_dir_all(&root);
     }
