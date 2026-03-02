@@ -87,12 +87,50 @@ pub struct ModrinthSearchHit {
     pub project_id: String,
     pub slug: String,
     pub description: String,
+    pub author: String,
+    pub icon_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModrinthDownloadFile {
     pub url: String,
     pub filename: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModrinthProjectDetails {
+    pub title: String,
+    pub website_url: String,
+    pub summary: String,
+    pub body_markdown: String,
+    pub issues_url: String,
+    pub source_url: String,
+    pub wiki_url: String,
+    pub discord_url: String,
+    pub donate_links: Vec<(String, String)>,
+    pub icon_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CurseForgeSearchHit {
+    pub mod_id: i64,
+    pub title: String,
+    pub slug: String,
+    pub summary: String,
+    pub website_url: String,
+    pub author: String,
+    pub icon_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CurseForgeProjectDetails {
+    pub title: String,
+    pub summary: String,
+    pub website_url: String,
+    pub issues_url: String,
+    pub source_url: String,
+    pub wiki_url: String,
+    pub icon_url: Option<String>,
 }
 
 pub fn default_launch_profile(instance_path: &Path) -> LaunchProfile {
@@ -739,6 +777,8 @@ struct ModrinthSearchHitResponse {
     project_id: String,
     slug: String,
     description: Option<String>,
+    author: Option<String>,
+    icon_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -753,6 +793,26 @@ struct ModrinthVersionFileResponse {
     url: String,
     filename: String,
     primary: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ModrinthProjectDetailsResponse {
+    title: String,
+    slug: String,
+    description: Option<String>,
+    body: Option<String>,
+    issues_url: Option<String>,
+    source_url: Option<String>,
+    wiki_url: Option<String>,
+    discord_url: Option<String>,
+    donation_urls: Option<Vec<ModrinthDonationLinkResponse>>,
+    icon_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ModrinthDonationLinkResponse {
+    platform: Option<String>,
+    url: Option<String>,
 }
 
 pub fn modrinth_search_projects(
@@ -807,6 +867,8 @@ pub fn modrinth_search_projects_by_type(
             project_id: x.project_id,
             slug: x.slug,
             description: x.description.unwrap_or_default(),
+            author: x.author.unwrap_or_default(),
+            icon_url: x.icon_url,
         })
         .collect())
 }
@@ -856,6 +918,277 @@ pub fn modrinth_resolve_primary_file(
     Ok(ModrinthDownloadFile {
         url: primary.url.clone(),
         filename: primary.filename.clone(),
+    })
+}
+
+pub fn modrinth_get_project_details(project_id: &str) -> Result<ModrinthProjectDetails, String> {
+    let id = project_id.trim();
+    if id.is_empty() {
+        return Err("modrinth project id is empty".to_string());
+    }
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let response = client
+        .get(format!("https://api.modrinth.com/v2/project/{id}"))
+        .send()
+        .map_err(|e| format!("modrinth project request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("modrinth project request returned {}", response.status()));
+    }
+    let parsed = response
+        .json::<ModrinthProjectDetailsResponse>()
+        .map_err(|e| format!("failed to parse modrinth project response: {e}"))?;
+
+    let donate_links = parsed
+        .donation_urls
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|x| {
+            let platform = x.platform?;
+            let url = x.url?;
+            if url.trim().is_empty() {
+                return None;
+            }
+            Some((platform, url))
+        })
+        .collect::<Vec<_>>();
+
+    Ok(ModrinthProjectDetails {
+        title: parsed.title,
+        website_url: format!("https://modrinth.com/project/{}", parsed.slug),
+        summary: parsed.description.unwrap_or_default(),
+        body_markdown: parsed.body.unwrap_or_default(),
+        issues_url: parsed.issues_url.unwrap_or_default(),
+        source_url: parsed.source_url.unwrap_or_default(),
+        wiki_url: parsed.wiki_url.unwrap_or_default(),
+        discord_url: parsed.discord_url.unwrap_or_default(),
+        donate_links,
+        icon_url: parsed.icon_url,
+    })
+}
+
+#[derive(Deserialize)]
+struct CurseForgeSearchEnvelope {
+    data: Vec<CurseForgeModData>,
+}
+
+#[derive(Deserialize)]
+struct CurseForgeModEnvelope {
+    data: CurseForgeModData,
+}
+
+#[derive(Deserialize)]
+struct CurseForgeFilesEnvelope {
+    data: Vec<CurseForgeFileData>,
+}
+
+#[derive(Deserialize)]
+struct CurseForgeModData {
+    id: i64,
+    name: String,
+    slug: String,
+    summary: Option<String>,
+    links: Option<CurseForgeLinks>,
+    authors: Option<Vec<CurseForgeAuthor>>,
+    logo: Option<CurseForgeLogo>,
+}
+
+#[derive(Deserialize)]
+struct CurseForgeAuthor {
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CurseForgeLogo {
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CurseForgeLinks {
+    website_url: Option<String>,
+    issues_url: Option<String>,
+    source_url: Option<String>,
+    wiki_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CurseForgeFileData {
+    #[serde(rename = "downloadUrl")]
+    download_url: Option<String>,
+    #[serde(rename = "fileName")]
+    file_name: Option<String>,
+    #[serde(rename = "gameVersions")]
+    game_versions: Option<Vec<String>>,
+}
+
+pub fn curseforge_search_projects(
+    api_key: &str,
+    query: &str,
+    game_version: &str,
+    class_id: i32,
+    limit: usize,
+) -> Result<Vec<CurseForgeSearchHit>, String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("CurseForge API key is empty".to_string());
+    }
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+    let mut req = client
+        .get("https://api.curseforge.com/v1/mods/search")
+        .header("x-api-key", key)
+        .query(&[
+            ("gameId", "432"),
+            ("classId", &class_id.to_string()),
+            ("searchFilter", q),
+            ("pageSize", &limit.to_string()),
+        ]);
+    if !game_version.trim().is_empty() {
+        req = req.query(&[("gameVersion", game_version.trim())]);
+    }
+
+    let response = req
+        .send()
+        .map_err(|e| format!("curseforge search failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("curseforge search returned {}", response.status()));
+    }
+
+    let parsed = response
+        .json::<CurseForgeSearchEnvelope>()
+        .map_err(|e| format!("failed to parse curseforge search response: {e}"))?;
+
+    Ok(parsed
+        .data
+        .into_iter()
+        .map(|x| CurseForgeSearchHit {
+            mod_id: x.id,
+            title: x.name,
+            slug: x.slug,
+            summary: x.summary.unwrap_or_default(),
+            website_url: x.links.and_then(|l| l.website_url).unwrap_or_default(),
+            author: x
+                .authors
+                .unwrap_or_default()
+                .into_iter()
+                .find_map(|a| a.name)
+                .unwrap_or_default(),
+            icon_url: x.logo.and_then(|l| l.url),
+        })
+        .collect())
+}
+
+pub fn curseforge_get_project_details(
+    api_key: &str,
+    mod_id: i64,
+) -> Result<CurseForgeProjectDetails, String> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("CurseForge API key is empty".to_string());
+    }
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+    let response = client
+        .get(format!("https://api.curseforge.com/v1/mods/{mod_id}"))
+        .header("x-api-key", key)
+        .send()
+        .map_err(|e| format!("curseforge project request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "curseforge project request returned {}",
+            response.status()
+        ));
+    }
+    let parsed = response
+        .json::<CurseForgeModEnvelope>()
+        .map_err(|e| format!("failed to parse curseforge project response: {e}"))?
+        .data;
+
+    Ok(CurseForgeProjectDetails {
+        title: parsed.name,
+        summary: parsed.summary.unwrap_or_default(),
+        website_url: parsed
+            .links
+            .as_ref()
+            .and_then(|x| x.website_url.clone())
+            .unwrap_or_default(),
+        issues_url: parsed
+            .links
+            .as_ref()
+            .and_then(|x| x.issues_url.clone())
+            .unwrap_or_default(),
+        source_url: parsed
+            .links
+            .as_ref()
+            .and_then(|x| x.source_url.clone())
+            .unwrap_or_default(),
+        wiki_url: parsed
+            .links
+            .as_ref()
+            .and_then(|x| x.wiki_url.clone())
+            .unwrap_or_default(),
+        icon_url: parsed.logo.and_then(|x| x.url),
+    })
+}
+
+pub fn curseforge_resolve_primary_file(
+    api_key: &str,
+    mod_id: i64,
+    game_version: &str,
+) -> Result<ModrinthDownloadFile, String> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err("CurseForge API key is empty".to_string());
+    }
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+    let response = client
+        .get(format!("https://api.curseforge.com/v1/mods/{mod_id}/files"))
+        .header("x-api-key", key)
+        .query(&[("pageSize", "50")])
+        .send()
+        .map_err(|e| format!("curseforge files request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("curseforge files request returned {}", response.status()));
+    }
+    let parsed = response
+        .json::<CurseForgeFilesEnvelope>()
+        .map_err(|e| format!("failed to parse curseforge files response: {e}"))?;
+    let selected = parsed.data.into_iter().find(|f| {
+        if game_version.trim().is_empty() {
+            return f.download_url.is_some() && f.file_name.is_some();
+        }
+        f.download_url.is_some()
+            && f.file_name.is_some()
+            && f.game_versions
+                .as_ref()
+                .map(|vs| vs.iter().any(|v| v == game_version))
+                .unwrap_or(false)
+    });
+    let selected = selected.ok_or_else(|| "no suitable curseforge file found".to_string())?;
+    Ok(ModrinthDownloadFile {
+        url: selected
+            .download_url
+            .ok_or_else(|| "selected curseforge file has no download URL".to_string())?,
+        filename: selected
+            .file_name
+            .ok_or_else(|| "selected curseforge file has no filename".to_string())?,
     })
 }
 

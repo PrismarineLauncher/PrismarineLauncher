@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 eframe = { version = "0.33", default-features = true }
 egui = "0.33"
+egui_commonmark = "0.22"
 image = "0.25"
 qrcode = "0.14"
 rust_core = { path = "./core" }
