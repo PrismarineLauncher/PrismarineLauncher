@@ -956,6 +956,37 @@ impl PrismarineApp {
         }
     }
 
+    fn do_add_jar_to_mods(&mut self) {
+        let Some(instance_path) = self.selected_instance_path() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        let Some(file_path) = rfd::FileDialog::new()
+            .add_filter("Java archives", &["jar"])
+            .pick_file()
+        else {
+            return;
+        };
+        let file_name = match file_path.file_name().and_then(|x| x.to_str()) {
+            Some(x) if !x.trim().is_empty() => x.to_string(),
+            _ => {
+                self.status = "Selected file name is invalid".to_string();
+                return;
+            }
+        };
+        let target_dir = preferred_mods_dir(&instance_path);
+        let target_path = target_dir.join(&file_name);
+        match fs::copy(&file_path, &target_path) {
+            Ok(_) => {
+                self.status = format!("Added jar: {} -> {}", file_name, target_path.display());
+                self.refresh_selected_content();
+            }
+            Err(err) => {
+                self.status = format!("Failed to add jar: {err}");
+            }
+        }
+    }
+
     fn persist(&self) {
         let state = PersistedState {
             selected: self.selected,
@@ -1890,8 +1921,8 @@ impl PrismarineApp {
 
     fn draw_mods_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Refresh Mods").clicked() {
-                self.refresh_selected_content();
+            if ui.button("Add Jar").clicked() {
+                self.do_add_jar_to_mods();
             }
             if ui.button("Auto Update Mods").clicked() {
                 self.do_auto_update_mods();
