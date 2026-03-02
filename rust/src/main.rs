@@ -132,6 +132,18 @@ enum CreateLoader {
     NeoForge,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CreateMode {
+    Custom,
+    Import,
+}
+
+impl Default for CreateMode {
+    fn default() -> Self {
+        Self::Custom
+    }
+}
+
 impl CreateLoader {
     fn label(&self) -> &'static str {
         match self {
@@ -405,9 +417,11 @@ struct PrismarineApp {
     data_root: PathBuf,
     active_tab: CenterTab,
     show_create_dialog: bool,
+    create_mode: CreateMode,
     create_name: String,
     create_game_version: String,
     create_loader: Option<CreateLoader>,
+    create_import_path: String,
     show_rename_dialog: bool,
     rename_name: String,
     show_copy_dialog: bool,
@@ -500,9 +514,11 @@ impl Default for PrismarineApp {
             data_root,
             active_tab: persisted.active_tab,
             show_create_dialog: false,
+            create_mode: CreateMode::Custom,
             create_name: String::new(),
             create_game_version: String::new(),
             create_loader: None,
+            create_import_path: String::new(),
             show_rename_dialog: false,
             rename_name: String::new(),
             show_copy_dialog: false,
@@ -2230,6 +2246,104 @@ impl PrismarineApp {
         }
     }
 
+    fn do_browse_import_archive(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Pack archives", &["mrpack", "zip"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.create_import_path = path.display().to_string();
+        if self.create_name.trim().is_empty() {
+            self.create_name = guess_instance_name_from_archive_path(&path);
+        }
+    }
+
+    fn do_import_instance(&mut self) {
+        let archive_path = PathBuf::from(self.create_import_path.trim());
+        if self.create_name.trim().is_empty() {
+            self.status = "Instance name must not be empty".to_string();
+            return;
+        }
+        if self.create_import_path.trim().is_empty() || !archive_path.is_file() {
+            self.status = "Choose valid .mrpack or .zip file".to_string();
+            return;
+        }
+
+        let instance_name = self.create_name.trim().to_string();
+        let lower = archive_path
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+
+        match create_instance(&self.instance_root(), &instance_name) {
+            Ok(created) => {
+                let result = if lower == "mrpack" {
+                    import_mrpack_archive(&archive_path, &created.path)
+                } else {
+                    import_zip_archive(&archive_path, &created.path)
+                };
+                match result {
+                    Ok(summary) => {
+                        if !summary.game_version.is_empty() {
+                            let loader = summary
+                                .loader
+                                .as_ref()
+                                .map_or("custom".to_string(), |x| x.cfg_value().to_string());
+                            let cfg_text = format!(
+                                "# PrismarineLauncher instance\nIntendedVersion={}\nManagedLoader={}\n",
+                                summary.game_version, loader
+                            );
+                            let _ = fs::write(created.path.join("instance.cfg"), cfg_text);
+
+                            let mut components = vec![
+                                serde_json::json!({"uid":"net.minecraft","version":summary.game_version}),
+                            ];
+                            if let Some(loader) = summary.loader {
+                                components.push(
+                                    serde_json::json!({"uid":loader.mmc_uid(),"version":"0.0.0"}),
+                                );
+                            }
+                            let mmc_pack = serde_json::json!({
+                                "formatVersion": 1,
+                                "components": components
+                            });
+                            let _ = fs::write(
+                                created.path.join("mmc-pack.json"),
+                                serde_json::to_string_pretty(&mmc_pack)
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                            );
+
+                            let mut profile = default_launch_profile(&created.path);
+                            upsert_arg_pair(
+                                &mut profile.game_args,
+                                "--version",
+                                summary.game_version.as_str(),
+                            );
+                            let _ = save_launch_profile(&created.path, &profile);
+                        }
+
+                        self.status = format!("Imported instance {}", instance_name);
+                        self.show_create_dialog = false;
+                        self.create_name.clear();
+                        self.create_game_version.clear();
+                        self.create_loader = None;
+                        self.create_import_path.clear();
+                        self.reload_instances();
+                    }
+                    Err(err) => {
+                        let _ = delete_instance(&created.path);
+                        self.status = format!("Failed to import archive: {err}");
+                    }
+                }
+            }
+            Err(err) => {
+                self.status = format!("Failed to create instance folder: {err}");
+            }
+        }
+    }
+
     fn do_rename_instance(&mut self) {
         let Some(path) = self.selected_instance_path() else {
             self.status = "No instance selected".to_string();
@@ -2537,9 +2651,11 @@ impl PrismarineApp {
     }
 
     fn open_create_dialog(&mut self) {
+        self.create_mode = CreateMode::Custom;
         self.create_name.clear();
         self.create_game_version.clear();
         self.create_loader = None;
+        self.create_import_path.clear();
         self.show_create_dialog = true;
     }
 
@@ -3454,45 +3570,91 @@ impl PrismarineApp {
         if self.show_create_dialog {
             egui::Window::new("Create Instance")
                 .collapsible(false)
-                .resizable(false)
+                .resizable(true)
+                .default_width(760.0)
                 .show(ctx, |ui| {
-                    ui.label("Instance name:");
-                    ui.text_edit_singleline(&mut self.create_name);
-                    ui.label("Game version (required):");
-                    ui.text_edit_singleline(&mut self.create_game_version);
-                    ui.label("Loader (required):");
-                    egui::ComboBox::from_id_salt("create_loader")
-                        .selected_text(
-                            self.create_loader
-                                .as_ref()
-                                .map(CreateLoader::label)
-                                .unwrap_or("Select loader"),
-                        )
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.create_loader,
-                                Some(CreateLoader::Fabric),
-                                "Fabric",
-                            );
-                            ui.selectable_value(
-                                &mut self.create_loader,
-                                Some(CreateLoader::Forge),
-                                "Forge",
-                            );
-                            ui.selectable_value(
-                                &mut self.create_loader,
-                                Some(CreateLoader::Quilt),
-                                "Quilt",
-                            );
-                            ui.selectable_value(
-                                &mut self.create_loader,
-                                Some(CreateLoader::NeoForge),
-                                "Neo-Forge",
-                            );
-                        });
                     ui.horizontal(|ui| {
-                        if ui.button("Create").clicked() {
-                            self.do_create_instance();
+                        ui.label("Имя:");
+                        ui.text_edit_singleline(&mut self.create_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Группа:");
+                        ui.label("Без группы");
+                    });
+                    ui.separator();
+                    ui.columns(2, |cols| {
+                        cols[0].set_min_width(170.0);
+                        cols[0].selectable_value(
+                            &mut self.create_mode,
+                            CreateMode::Custom,
+                            "Пользовательский",
+                        );
+                        cols[0].selectable_value(
+                            &mut self.create_mode,
+                            CreateMode::Import,
+                            "Импорт",
+                        );
+
+                        cols[1].heading(match self.create_mode {
+                            CreateMode::Custom => "Пользовательский",
+                            CreateMode::Import => "Импорт",
+                        });
+                        cols[1].separator();
+                        match self.create_mode {
+                            CreateMode::Custom => {
+                                cols[1].label("Версия (обязательно):");
+                                cols[1].text_edit_singleline(&mut self.create_game_version);
+                                cols[1].label("Загрузчик модов (обязательно):");
+                                egui::ComboBox::from_id_salt("create_loader")
+                                    .selected_text(
+                                        self.create_loader
+                                            .as_ref()
+                                            .map(CreateLoader::label)
+                                            .unwrap_or("Select loader"),
+                                    )
+                                    .show_ui(&mut cols[1], |ui| {
+                                        ui.selectable_value(
+                                            &mut self.create_loader,
+                                            Some(CreateLoader::Fabric),
+                                            "Fabric",
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.create_loader,
+                                            Some(CreateLoader::Forge),
+                                            "Forge",
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.create_loader,
+                                            Some(CreateLoader::Quilt),
+                                            "Quilt",
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.create_loader,
+                                            Some(CreateLoader::NeoForge),
+                                            "Neo-Forge",
+                                        );
+                                    });
+                            }
+                            CreateMode::Import => {
+                                cols[1].label("Архив сборки (.mrpack или .zip):");
+                                cols[1].horizontal(|ui| {
+                                    ui.text_edit_singleline(&mut self.create_import_path);
+                                    if ui.button("Обзор").clicked() {
+                                        self.do_browse_import_archive();
+                                    }
+                                });
+                                cols[1].label(
+                                    "Поддержка импорта: только .mrpack и .zip (без FTB/CurseForge/Modrinth API).",
+                                );
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            match self.create_mode {
+                                CreateMode::Custom => self.do_create_instance(),
+                                CreateMode::Import => self.do_import_instance(),
+                            }
                         }
                         if ui.button("Cancel").clicked() {
                             self.show_create_dialog = false;
@@ -3841,6 +4003,153 @@ fn minecraft_body_icon_url(name: &str) -> String {
         "https://crafatar.com/renders/body/{}?overlay=true",
         percent_encode_query(name)
     )
+}
+
+#[derive(Default)]
+struct ImportSummary {
+    game_version: String,
+    loader: Option<CreateLoader>,
+}
+
+fn guess_instance_name_from_archive_path(path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .and_then(|x| x.to_str())
+        .unwrap_or("Imported Instance");
+    file_name
+        .strip_suffix(".mrpack")
+        .or_else(|| file_name.strip_suffix(".zip"))
+        .unwrap_or(file_name)
+        .trim()
+        .to_string()
+}
+
+fn safe_zip_entry_target(base: &Path, entry_name: &str) -> Option<PathBuf> {
+    let mut target = base.to_path_buf();
+    for component in Path::new(entry_name).components() {
+        match component {
+            std::path::Component::Normal(part) => target.push(part),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(target)
+}
+
+fn extract_zip_file_to_dir(zip_path: &Path, destination: &Path) -> Result<(), String> {
+    let file = fs::File::open(zip_path)
+        .map_err(|e| format!("failed to open archive {}: {e}", zip_path.display()))?;
+    let mut zip = ZipArchive::new(file)
+        .map_err(|e| format!("failed to parse archive {}: {e}", zip_path.display()))?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("failed to read archive entry #{i}: {e}"))?;
+        let name = entry.name().to_string();
+        let Some(target) = safe_zip_entry_target(destination, &name) else {
+            continue;
+        };
+        if name.ends_with('/') {
+            fs::create_dir_all(&target)
+                .map_err(|e| format!("failed to create dir {}: {e}", target.display()))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create dir {}: {e}", parent.display()))?;
+        }
+        let mut out = fs::File::create(&target)
+            .map_err(|e| format!("failed to write file {}: {e}", target.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("failed to extract file {}: {e}", target.display()))?;
+    }
+    Ok(())
+}
+
+fn import_zip_archive(zip_path: &Path, instance_path: &Path) -> Result<ImportSummary, String> {
+    extract_zip_file_to_dir(zip_path, instance_path)?;
+    Ok(ImportSummary::default())
+}
+
+fn import_mrpack_archive(
+    mrpack_path: &Path,
+    instance_path: &Path,
+) -> Result<ImportSummary, String> {
+    let file = fs::File::open(mrpack_path)
+        .map_err(|e| format!("failed to open mrpack {}: {e}", mrpack_path.display()))?;
+    let mut zip = ZipArchive::new(file)
+        .map_err(|e| format!("failed to parse mrpack {}: {e}", mrpack_path.display()))?;
+
+    let mut summary = ImportSummary::default();
+    let mut index_json_text = None::<String>;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("failed to read mrpack entry #{i}: {e}"))?;
+        let name = entry.name().to_string();
+        if name == "modrinth.index.json" {
+            let mut text = String::new();
+            entry.read_to_string(&mut text).map_err(|e| {
+                format!(
+                    "failed to read modrinth.index.json from {}: {e}",
+                    mrpack_path.display()
+                )
+            })?;
+            index_json_text = Some(text);
+            continue;
+        }
+        let target = if let Some(rest) = name.strip_prefix("overrides/") {
+            safe_zip_entry_target(&instance_path.join("minecraft"), rest)
+        } else if let Some(rest) = name.strip_prefix("client-overrides/") {
+            safe_zip_entry_target(&instance_path.join("minecraft"), rest)
+        } else {
+            None
+        };
+        let Some(target) = target else {
+            continue;
+        };
+        if name.ends_with('/') {
+            let _ = fs::create_dir_all(&target);
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut out = fs::File::create(&target)
+            .map_err(|e| format!("failed to write file {}: {e}", target.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("failed to extract file {}: {e}", target.display()))?;
+    }
+
+    if let Some(text) = index_json_text {
+        let mrpack_dir = instance_path.join("mrpack");
+        fs::create_dir_all(&mrpack_dir)
+            .map_err(|e| format!("failed to create mrpack dir {}: {e}", mrpack_dir.display()))?;
+        let index_path = mrpack_dir.join("modrinth.index.json");
+        fs::write(&index_path, text.as_bytes())
+            .map_err(|e| format!("failed to write {}: {e}", index_path.display()))?;
+
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(dep) = json.get("dependencies").and_then(|x| x.as_object())
+        {
+            summary.game_version = dep
+                .get("minecraft")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if dep.get("fabric-loader").is_some() {
+                summary.loader = Some(CreateLoader::Fabric);
+            } else if dep.get("quilt-loader").is_some() {
+                summary.loader = Some(CreateLoader::Quilt);
+            } else if dep.get("forge").is_some() {
+                summary.loader = Some(CreateLoader::Forge);
+            } else if dep.get("neoforge").is_some() {
+                summary.loader = Some(CreateLoader::NeoForge);
+            }
+        }
+    }
+
+    Ok(summary)
 }
 
 fn preferred_mods_dir(instance_path: &Path) -> PathBuf {
