@@ -2224,17 +2224,17 @@ impl PrismarineApp {
 
     fn sync_process_states(&mut self) {
         let keys: Vec<String> = self.processes.keys().cloned().collect();
-        let mut finished = Vec::new();
+        let mut finished: Vec<(String, Option<i32>)> = Vec::new();
         for key in keys {
             if let Some(child) = self.processes.get_mut(&key) {
                 match child.try_wait() {
-                    Ok(Some(_)) => finished.push(key),
+                    Ok(Some(status)) => finished.push((key, status.code())),
                     Ok(None) => {}
-                    Err(_) => finished.push(key),
+                    Err(_) => finished.push((key, None)),
                 }
             }
         }
-        for key in finished {
+        for (key, exit_code) in finished {
             self.processes.remove(&key);
             if let Some(post) = self.post_exit_commands.remove(&key) {
                 let _ = Command::new("sh")
@@ -2242,6 +2242,25 @@ impl PrismarineApp {
                     .arg(post)
                     .current_dir(&key)
                     .status();
+            }
+            let name = self
+                .instances
+                .iter()
+                .find(|i| i.path == key)
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| key.clone());
+            match exit_code {
+                Some(code) => {
+                    self.status = format!("{name} stopped (exit code {code})");
+                    self.append_launcher_log(
+                        &key,
+                        &format!("[Launcher] Process exited with code {code}"),
+                    );
+                }
+                None => {
+                    self.status = format!("{name} stopped");
+                    self.append_launcher_log(&key, "[Launcher] Process exited");
+                }
             }
         }
         for instance in &mut self.instances {
@@ -2592,7 +2611,8 @@ impl PrismarineApp {
         let instance_version = self.detect_instance_version(&instance_path);
         let instance_loader = self.detect_instance_loader(&instance_path);
         let should_prepare_runtime = instance_version != "unknown"
-            && (instance_loader.is_empty() || profile.classpath.is_empty());
+            && instance_loader.is_empty()
+            && profile.classpath.is_empty();
 
         self.pending_launches.insert(
             instance.path.clone(),
@@ -2717,6 +2737,8 @@ impl PrismarineApp {
 
     fn spawn_prepared_instance(&mut self, ctx: PendingLaunchContext, profile: LaunchProfile) {
         let instance_path = PathBuf::from(&ctx.instance.path);
+        let _ = save_launch_profile(&instance_path, &profile);
+        self.launch_profile = profile.clone();
         let (exe, args) = build_java_command(&profile);
 
         let logs_dir = instance_path.join("logs");
