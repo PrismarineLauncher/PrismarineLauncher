@@ -18,6 +18,12 @@ pub struct InstanceSummary {
     pub modified_unix_ms: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogSummary {
+    pub file_name: String,
+    pub path: PathBuf,
+}
+
 pub fn parse_s3_time(input: &str) -> Option<(i64, i32)> {
     let parsed = DateTime::parse_from_rfc3339(input).ok()?;
     Some((parsed.timestamp_millis(), parsed.offset().local_minus_utc()))
@@ -87,8 +93,150 @@ pub fn scan_instances(root: &Path) -> std::io::Result<Vec<InstanceSummary>> {
     Ok(out)
 }
 
+pub fn create_instance(root: &Path, name: &str) -> std::io::Result<InstanceSummary> {
+    let cleaned = name.trim();
+    if cleaned.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "instance name is empty",
+        ));
+    }
+    let path = root.join(cleaned);
+    fs::create_dir_all(path.join("mods"))?;
+    fs::create_dir_all(path.join("logs"))?;
+    fs::create_dir_all(path.join("saves"))?;
+    fs::write(
+        path.join("instance.cfg"),
+        b"# PrismarineLauncher instance\n",
+    )?;
+    let modified_unix_ms = fs::metadata(&path)?
+        .modified()
+        .ok()
+        .and_then(|x| x.duration_since(UNIX_EPOCH).ok())
+        .map(|x| x.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(InstanceSummary {
+        name: cleaned.to_string(),
+        path,
+        modified_unix_ms,
+    })
+}
+
+pub fn delete_instance(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn copy_instance(src: &Path, root: &Path, new_name: &str) -> std::io::Result<InstanceSummary> {
+    let cleaned = new_name.trim();
+    if cleaned.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "new instance name is empty",
+        ));
+    }
+    let dst = root.join(cleaned);
+    copy_dir_recursive(src, &dst)?;
+    let modified_unix_ms = fs::metadata(&dst)?
+        .modified()
+        .ok()
+        .and_then(|x| x.duration_since(UNIX_EPOCH).ok())
+        .map(|x| x.as_millis() as i64)
+        .unwrap_or(0);
+    Ok(InstanceSummary {
+        name: cleaned.to_string(),
+        path: dst,
+        modified_unix_ms,
+    })
+}
+
+pub fn rename_instance(path: &Path, new_name: &str) -> std::io::Result<PathBuf> {
+    let cleaned = new_name.trim();
+    if cleaned.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "new instance name is empty",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "instance has no parent")
+    })?;
+    let new_path = parent.join(cleaned);
+    fs::rename(path, &new_path)?;
+    Ok(new_path)
+}
+
+pub fn list_mod_files(instance_path: &Path) -> std::io::Result<Vec<String>> {
+    let mods_dir = instance_path.join("mods");
+    if !mods_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut mods = Vec::new();
+    for entry in fs::read_dir(mods_dir)? {
+        let entry = entry?;
+        if let Some(name) = entry.file_name().to_str() {
+            mods.push(name.to_string());
+        }
+    }
+    mods.sort();
+    Ok(mods)
+}
+
+pub fn list_logs(instance_path: &Path) -> std::io::Result<Vec<LogSummary>> {
+    let logs_dir = instance_path.join("logs");
+    if !logs_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut logs = Vec::new();
+    for entry in fs::read_dir(logs_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        logs.push(LogSummary {
+            file_name: name.to_string(),
+            path,
+        });
+    }
+    logs.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    Ok(logs)
+}
+
+pub fn read_log_preview(path: &Path, max_chars: usize) -> std::io::Result<String> {
+    let text = fs::read_to_string(path)?;
+    if text.chars().count() <= max_chars {
+        return Ok(text);
+    }
+    Ok(text.chars().take(max_chars).collect())
+}
+
 #[unsafe(no_mangle)]
-pub extern "C" fn prismarine_parse_s3_time(input: *const c_char, out_result: *mut PrismarineTimestampResult) -> i32 {
+pub extern "C" fn prismarine_parse_s3_time(
+    input: *const c_char,
+    out_result: *mut PrismarineTimestampResult,
+) -> i32 {
     if input.is_null() || out_result.is_null() {
         return 1;
     }
@@ -139,7 +287,10 @@ pub extern "C" fn prismarine_format_s3_time(
 
 #[cfg(test)]
 mod tests {
-    use super::{format_s3_time, parse_s3_time, scan_instances};
+    use super::{
+        copy_instance, create_instance, delete_instance, format_s3_time, list_logs, list_mod_files,
+        parse_s3_time, read_log_preview, rename_instance, scan_instances,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -169,7 +320,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let base = PathBuf::from(format!("/tmp/prismarine_launcher_test_{}_{}", std::process::id(), nanos));
+        let base = PathBuf::from(format!(
+            "/tmp/prismarine_launcher_test_{}_{}",
+            std::process::id(),
+            nanos
+        ));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("Alpha")).expect("create alpha");
         fs::create_dir_all(base.join("Beta")).expect("create beta");
@@ -181,5 +336,46 @@ mod tests {
         assert_eq!(items[1].name, "Beta");
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn instance_filesystem_operations_work() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = PathBuf::from(format!(
+            "/tmp/prismarine_launcher_ops_test_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create root");
+
+        let created = create_instance(&root, "Alpha").expect("create instance");
+        assert_eq!(created.name, "Alpha");
+        fs::write(created.path.join("mods").join("example.jar"), b"jar").expect("write mod");
+        fs::write(created.path.join("logs").join("latest.log"), b"hello log").expect("write log");
+
+        let mods = list_mod_files(&created.path).expect("list mods");
+        assert_eq!(mods, vec!["example.jar".to_string()]);
+
+        let logs = list_logs(&created.path).expect("list logs");
+        assert_eq!(logs.len(), 1);
+        let preview = read_log_preview(&logs[0].path, 100).expect("preview");
+        assert!(preview.contains("hello log"));
+
+        let copied = copy_instance(&created.path, &root, "Alpha Copy").expect("copy");
+        assert_eq!(copied.name, "Alpha Copy");
+
+        let renamed = rename_instance(&copied.path, "Alpha Renamed").expect("rename");
+        assert!(renamed.ends_with("Alpha Renamed"));
+
+        delete_instance(&created.path).expect("delete created");
+        delete_instance(&renamed).expect("delete renamed");
+        let remaining = scan_instances(&root).expect("scan remaining");
+        assert!(remaining.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
