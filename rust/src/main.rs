@@ -370,13 +370,31 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 32;
+const LAUNCHER_VERSION_BUILD: u32 = 33;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
 }
 
 const LOG_PREVIEW_MAX_CHARS: usize = 2_000_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LogLineKind {
+    Default,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Stacktrace,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedLogLine {
+    line_no: usize,
+    text: String,
+    kind: LogLineKind,
+    strong: bool,
+}
 
 enum DeviceLoginEvent {
     Success(LicensedMicrosoftAccount),
@@ -621,6 +639,7 @@ struct PrismarineApp {
     logs_cache: Vec<(String, String)>,
     selected_log: Option<usize>,
     log_preview: String,
+    prepared_log_preview: Vec<PreparedLogLine>,
     launch_profile: LaunchProfile,
     processes: HashMap<String, Child>,
     show_add_account_dialog: bool,
@@ -788,6 +807,7 @@ impl Default for PrismarineApp {
             logs_cache: Vec::new(),
             selected_log: None,
             log_preview: String::new(),
+            prepared_log_preview: Vec::new(),
             launch_profile: default_launch_profile(Path::new(".")),
             processes: HashMap::new(),
             show_add_account_dialog: false,
@@ -4270,6 +4290,7 @@ impl PrismarineApp {
         self.logs_cache.clear();
         self.selected_log = None;
         self.log_preview.clear();
+        self.prepared_log_preview.clear();
 
         let Some(path) = self.selected_instance_path() else {
             self.modrinth_loader.clear();
@@ -5466,12 +5487,32 @@ impl PrismarineApp {
         match read_log_preview(Path::new(&path), LOG_PREVIEW_MAX_CHARS) {
             Ok(text) => {
                 self.log_preview = text;
+                self.rebuild_prepared_log_preview();
             }
             Err(err) => {
                 self.log_preview.clear();
+                self.prepared_log_preview.clear();
                 self.status = format!("Failed to read log: {err}");
             }
         }
+    }
+
+    fn rebuild_prepared_log_preview(&mut self) {
+        self.prepared_log_preview = self
+            .log_preview
+            .lines()
+            .enumerate()
+            .map(|(idx, raw)| {
+                let text = sanitize_log_line(raw);
+                let (kind, strong) = classify_log_line_kind(&text);
+                PreparedLogLine {
+                    line_no: idx + 1,
+                    text,
+                    kind,
+                    strong,
+                }
+            })
+            .collect();
     }
 
     fn top_menu(&mut self, ui: &mut egui::Ui) {
@@ -7485,41 +7526,62 @@ impl PrismarineApp {
                 |ui| {
                     ui.label("Preview");
                     ui.separator();
-                    egui::ScrollArea::both()
-                        .id_salt("logs_preview_scroll")
-                        .max_height(panel_h - 24.0)
+                    let preview_h = panel_h - 24.0;
+                    egui::ScrollArea::horizontal()
+                        .id_salt("logs_preview_scroll_x")
+                        .max_height(preview_h)
                         .show(ui, |ui| {
-                            if self.log_preview.is_empty() {
+                            if self.prepared_log_preview.is_empty() {
                                 ui.label("No log selected");
                             } else {
-                                for (idx, raw_line) in self.log_preview.lines().enumerate() {
-                                    let line = sanitize_log_line(raw_line);
-                                    ui.horizontal(|ui| {
-                                        ui.add_sized(
-                                            [44.0, 0.0],
-                                            egui::Label::new(
-                                                egui::RichText::new(format!("{:>4}", idx + 1))
-                                                    .monospace()
-                                                    .size(13.0)
-                                                    .color(egui::Color32::from_rgb(115, 121, 133)),
-                                            ),
-                                        );
-                                        if line.is_empty() {
-                                            ui.monospace(" ");
-                                        } else {
-                                            let style =
-                                                classify_log_line_style(&line, ui.visuals());
-                                            let mut text = egui::RichText::new(line.as_str())
-                                                .monospace()
-                                                .size(14.0)
-                                                .color(style.0);
-                                            if style.1 {
-                                                text = text.strong();
+                                let row_h = 19.0;
+                                egui::ScrollArea::vertical()
+                                    .id_salt("logs_preview_scroll_y")
+                                    .max_height(preview_h)
+                                    .show_rows(
+                                        ui,
+                                        row_h,
+                                        self.prepared_log_preview.len(),
+                                        |ui, row_range| {
+                                            for i in row_range {
+                                                let line = &self.prepared_log_preview[i];
+                                                ui.horizontal(|ui| {
+                                                    ui.add_sized(
+                                                        [44.0, 0.0],
+                                                        egui::Label::new(
+                                                            egui::RichText::new(format!(
+                                                                "{:>4}",
+                                                                line.line_no
+                                                            ))
+                                                            .monospace()
+                                                            .size(13.0)
+                                                            .color(egui::Color32::from_rgb(
+                                                                115, 121, 133,
+                                                            )),
+                                                        ),
+                                                    );
+                                                    if line.text.is_empty() {
+                                                        ui.monospace(" ");
+                                                    } else {
+                                                        let (color, strong) =
+                                                            log_line_style_from_kind(
+                                                                line.kind,
+                                                                ui.visuals(),
+                                                            );
+                                                        let mut text =
+                                                            egui::RichText::new(line.text.as_str())
+                                                                .monospace()
+                                                                .size(14.0)
+                                                                .color(color);
+                                                        if strong || line.strong {
+                                                            text = text.strong();
+                                                        }
+                                                        ui.label(text);
+                                                    }
+                                                });
                                             }
-                                            ui.label(text);
-                                        }
-                                    });
-                                }
+                                        },
+                                    );
                             }
                         });
                 },
@@ -10376,28 +10438,53 @@ fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn classify_log_line_style(line: &str, visuals: &egui::Visuals) -> (egui::Color32, bool) {
+fn classify_log_line_kind(line: &str) -> (LogLineKind, bool) {
     let lower = line.to_ascii_lowercase();
     if lower.contains(" exception")
         || lower.contains("fatal")
         || lower.contains("error")
+        || lower.contains("[error]")
+        || lower.contains("/error]")
         || line.starts_with("Caused by:")
     {
-        return (egui::Color32::from_rgb(232, 102, 102), true);
+        return (LogLineKind::Error, true);
     }
-    if lower.contains(" warn") || lower.contains("[warn]") || lower.contains("warning") {
-        return (egui::Color32::from_rgb(230, 190, 80), false);
+    if lower.contains(" warn")
+        || lower.contains("[warn]")
+        || lower.contains("/warn]")
+        || lower.contains("warning")
+    {
+        return (LogLineKind::Warn, false);
     }
-    if lower.contains(" info") || lower.contains("[info]") || lower.contains("starting ") {
-        return (egui::Color32::from_rgb(134, 186, 255), false);
+    if lower.contains(" info")
+        || lower.contains("[info]")
+        || lower.contains("/info]")
+        || lower.contains("starting ")
+    {
+        return (LogLineKind::Info, false);
     }
-    if lower.contains("debug") || lower.contains("trace") {
-        return (egui::Color32::from_rgb(135, 147, 168), false);
+    if lower.contains("debug") || lower.contains("[debug]") || lower.contains("/debug]") {
+        return (LogLineKind::Debug, false);
     }
-    if line.starts_with('\t') || line.trim_start().starts_with("at ") {
-        return (egui::Color32::from_rgb(176, 124, 216), false);
+    if line.starts_with('\t')
+        || line.trim_start().starts_with("at ")
+        || line.trim_start().starts_with("... ")
+        || lower.contains("stack trace")
+    {
+        return (LogLineKind::Stacktrace, false);
     }
-    (visuals.text_color(), false)
+    (LogLineKind::Default, false)
+}
+
+fn log_line_style_from_kind(kind: LogLineKind, visuals: &egui::Visuals) -> (egui::Color32, bool) {
+    match kind {
+        LogLineKind::Error => (egui::Color32::from_rgb(236, 98, 98), true),
+        LogLineKind::Warn => (egui::Color32::from_rgb(238, 192, 82), false),
+        LogLineKind::Info => (egui::Color32::from_rgb(108, 186, 255), false),
+        LogLineKind::Debug => (egui::Color32::from_rgb(142, 150, 170), false),
+        LogLineKind::Stacktrace => (egui::Color32::from_rgb(186, 128, 222), false),
+        LogLineKind::Default => (visuals.text_color(), false),
+    }
 }
 
 fn sanitize_log_line(line: &str) -> String {
