@@ -104,7 +104,7 @@ impl Default for DownloadProvider {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 enum DownloadContentType {
     Mods,
     ResourcePacks,
@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 14;
+const LAUNCHER_VERSION_BUILD: u32 = 15;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -5503,6 +5503,43 @@ impl PrismarineApp {
         self.ensure_icon_texture(ctx, icon_source)
     }
 
+    fn default_category_icon_source(content_type: DownloadContentType) -> &'static str {
+        match content_type {
+            DownloadContentType::Mods => {
+                "https://minecraft.wiki/images/Impulse_Command_Block.gif?fb024?download"
+            }
+            DownloadContentType::ResourcePacks => {
+                "https://minecraft.wiki/images/White_Dye_JE2_BE2.png?f9a07?download"
+            }
+            DownloadContentType::ShaderPacks => {
+                "https://ru.minecraft.wiki/images/%D0%A1%D0%B2%D0%B5%D1%82%D1%8F%D1%89%D0%B8%D0%B9%D1%81%D1%8F_%D1%87%D0%B5%D1%80%D0%BD%D0%B8%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9_%D0%BC%D0%B5%D1%88%D0%BE%D0%BA_JE1.png?377c1?download"
+            }
+            DownloadContentType::Worlds => {
+                "https://minecraft.wiki/images/Grass_Block_JE7_BE6.png?2bd37?download"
+            }
+            DownloadContentType::Servers => {
+                "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download"
+            }
+            DownloadContentType::Screenshots => {
+                "https://minecraft.wiki/images/Painting_JE2_BE2.png?45334?download"
+            }
+        }
+    }
+
+    fn ensure_content_icon_with_fallback(
+        &mut self,
+        ctx: &egui::Context,
+        content_type: DownloadContentType,
+        icon_source: Option<&str>,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(source) = icon_source
+            && let Some(tex) = self.ensure_icon_texture_from_source(ctx, source)
+        {
+            return Some(tex);
+        }
+        self.ensure_icon_texture_from_source(ctx, Self::default_category_icon_source(content_type))
+    }
+
     fn ensure_qr_texture(
         &mut self,
         ctx: &egui::Context,
@@ -6231,18 +6268,12 @@ impl PrismarineApp {
                                     egui::vec2(col_image, row_height + 2.0),
                                     egui::Layout::left_to_right(egui::Align::Min),
                                     |ui| {
-                                        if let Some(icon_path) = &icon_path {
-                                            if let Some(tex) = self.ensure_icon_texture_from_source(
-                                                ui.ctx(),
-                                                icon_path,
-                                            ) {
-                                                ui.image((
-                                                    tex.id(),
-                                                    egui::vec2(icon_size, icon_size),
-                                                ));
-                                            } else {
-                                                ui.add_space(icon_size);
-                                            }
+                                        if let Some(tex) = self.ensure_content_icon_with_fallback(
+                                            ui.ctx(),
+                                            DownloadContentType::Mods,
+                                            icon_path.as_deref(),
+                                        ) {
+                                            ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
                                         } else {
                                             ui.add_space(icon_size);
                                         }
@@ -6488,20 +6519,17 @@ impl PrismarineApp {
                                             egui::vec2(col_name, row_height + 8.0),
                                             egui::Layout::left_to_right(egui::Align::Center),
                                             |ui| {
-                                                if let Some(icon) = &icon_path {
-                                                    if let Some(tex) = self
-                                                        .ensure_icon_texture_from_source(
-                                                            ui.ctx(),
-                                                            icon,
-                                                        )
-                                                    {
-                                                        ui.image((
-                                                            tex.id(),
-                                                            egui::vec2(icon_size, icon_size),
-                                                        ));
-                                                    } else {
-                                                        ui.add_space(icon_size);
-                                                    }
+                                                if let Some(tex) = self
+                                                    .ensure_content_icon_with_fallback(
+                                                        ui.ctx(),
+                                                        DownloadContentType::Servers,
+                                                        icon_path.as_deref(),
+                                                    )
+                                                {
+                                                    ui.image((
+                                                        tex.id(),
+                                                        egui::vec2(icon_size, icon_size),
+                                                    ));
                                                 } else {
                                                     ui.add_space(icon_size);
                                                 }
@@ -6628,20 +6656,17 @@ impl PrismarineApp {
                                         egui::vec2(col_image, row_height + 2.0),
                                         egui::Layout::left_to_right(egui::Align::Min),
                                         |ui| {
-                                            if let Some(icon_path) = &icon_path {
-                                                if let Some(tex) = self
-                                                    .ensure_icon_texture_from_source(
-                                                        ui.ctx(),
-                                                        icon_path,
-                                                    )
-                                                {
-                                                    ui.image((
-                                                        tex.id(),
-                                                        egui::vec2(icon_size, icon_size),
-                                                    ));
-                                                } else {
-                                                    ui.add_space(icon_size);
-                                                }
+                                            if let Some(tex) = self
+                                                .ensure_content_icon_with_fallback(
+                                                    ui.ctx(),
+                                                    self.download_content_type,
+                                                    icon_path.as_deref(),
+                                                )
+                                            {
+                                                ui.image((
+                                                    tex.id(),
+                                                    egui::vec2(icon_size, icon_size),
+                                                ));
                                             } else {
                                                 ui.add_space(icon_size);
                                             }
