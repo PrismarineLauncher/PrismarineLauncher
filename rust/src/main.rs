@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 24;
+const LAUNCHER_VERSION_BUILD: u32 = 25;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -6220,6 +6220,14 @@ impl PrismarineApp {
             DownloadContentType::Servers => "Installed servers search:",
             DownloadContentType::Screenshots => "Installed screenshots search:",
         };
+        let category_title = match self.download_content_type {
+            DownloadContentType::Mods => "Mods",
+            DownloadContentType::ResourcePacks => "Resource Packs",
+            DownloadContentType::ShaderPacks => "Shader Packs",
+            DownloadContentType::Worlds => "Worlds",
+            DownloadContentType::Servers => "Servers",
+            DownloadContentType::Screenshots => "Screenshots",
+        };
         ui.horizontal(|ui| {
             if ui.button("Add Content").clicked() {
                 self.do_add_content_file();
@@ -6232,12 +6240,10 @@ impl PrismarineApp {
             if ui.button("Download Content").clicked() {
                 self.show_download_panel = !self.show_download_panel;
             }
-            ui.separator();
-            ui.label(format!("Total: {}", current_total));
         });
         egui::SidePanel::left("content_categories_left")
             .resizable(false)
-            .exact_width(128.0)
+            .exact_width(56.0)
             .show_inside(ui, |ui| {
                 let items: &[(DownloadContentType, &str, &str)] = &[
                     (
@@ -6275,33 +6281,21 @@ impl PrismarineApp {
                     let selected = self.download_content_type == *kind;
                     let mut clicked = false;
                     ui.scope(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
-                        ui.spacing_mut().button_padding = egui::vec2(4.0, 3.0);
-                        ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(2.0, 3.0);
+                        ui.spacing_mut().button_padding = egui::vec2(2.0, 2.0);
+                        ui.vertical_centered(|ui| {
                             if let Some(tex) =
                                 self.ensure_icon_texture_from_source(ui.ctx(), icon_url)
                             {
-                                if ui
+                                let resp = ui
                                     .add(
                                         egui::Button::image((tex.id(), egui::vec2(30.0, 30.0)))
                                             .selected(selected),
                                     )
-                                    .clicked()
-                                {
+                                    .on_hover_text(*title);
+                                if resp.clicked() {
                                     clicked = true;
                                 }
-                            }
-                            let label = truncate_with_ellipsis(title, 18);
-                            if ui
-                                .add_sized(
-                                    [88.0, 30.0],
-                                    egui::Button::new(egui::RichText::new(label).size(15.0))
-                                        .selected(selected)
-                                        .frame(false),
-                                )
-                                .clicked()
-                            {
-                                clicked = true;
                             }
                         });
                     });
@@ -6328,6 +6322,15 @@ impl PrismarineApp {
                     }
                 }
             });
+        ui.horizontal(|ui| {
+            ui.heading(category_title);
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(format!("Total: {current_total}"))
+                    .size(13.0)
+                    .weak(),
+            );
+        });
         ui.horizontal(|ui| {
             ui.label(search_label);
             ui.text_edit_singleline(&mut self.mods_filter);
