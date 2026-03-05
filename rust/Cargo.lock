@@ -3240,7 +3240,7 @@ dependencies = [
 
 [[package]]
 name = "prismarine_launcher"
-version = "1.0.23"
+version = "1.0.24"
 dependencies = [
  "anyhow",
  "arboard",
