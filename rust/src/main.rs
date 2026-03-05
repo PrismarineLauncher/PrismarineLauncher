@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 17;
+const LAUNCHER_VERSION_BUILD: u32 = 18;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -6023,7 +6023,7 @@ impl PrismarineApp {
         });
         egui::SidePanel::left("content_categories_left")
             .resizable(false)
-            .exact_width(112.0)
+            .exact_width(98.0)
             .show_inside(ui, |ui| {
                 let items: &[(DownloadContentType, &str, &str)] = &[
                     (
@@ -6062,14 +6062,14 @@ impl PrismarineApp {
                     let mut clicked = false;
                     ui.scope(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.spacing_mut().button_padding = egui::vec2(3.0, 1.0);
+                        ui.spacing_mut().button_padding = egui::vec2(2.0, 0.0);
                         ui.vertical_centered(|ui| {
                             if let Some(tex) =
                                 self.ensure_icon_texture_from_source(ui.ctx(), icon_url)
                             {
                                 if ui
                                     .add(
-                                        egui::Button::image((tex.id(), egui::vec2(28.0, 28.0)))
+                                        egui::Button::image((tex.id(), egui::vec2(22.0, 22.0)))
                                             .selected(selected),
                                     )
                                     .clicked()
@@ -6080,8 +6080,8 @@ impl PrismarineApp {
                             let label = truncate_with_ellipsis(title, 15);
                             if ui
                                 .add_sized(
-                                    [96.0, 16.0],
-                                    egui::Button::new(egui::RichText::new(label).size(11.5))
+                                    [86.0, 13.0],
+                                    egui::Button::new(egui::RichText::new(label).size(10.5))
                                         .selected(selected)
                                         .frame(false),
                                 )
@@ -6114,7 +6114,7 @@ impl PrismarineApp {
                     }
                     if idx + 1 < items.len() {
                         let (sep_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 1.0),
+                            egui::vec2(ui.available_width(), 0.0),
                             egui::Sense::hover(),
                         );
                         let y = sep_rect.center().y;
