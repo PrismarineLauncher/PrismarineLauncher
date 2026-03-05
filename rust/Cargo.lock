@@ -3240,10 +3240,11 @@ dependencies = [
 
 [[package]]
 name = "prismarine_launcher"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "arboard",
+ "base64",
  "chrono",
  "eframe",
  "egui",

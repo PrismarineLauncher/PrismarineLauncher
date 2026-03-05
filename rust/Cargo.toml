@@ -1,11 +1,12 @@
 [package]
 name = "prismarine_launcher"
-version = "1.0.19"
+version = "1.0.20"
 edition = "2024"
 
 [dependencies]
 anyhow = "1"
 arboard = "3"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 eframe = { version = "0.33", default-features = true }
 egui = "0.33"

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use arboard::Clipboard;
+use base64::Engine;
 use eframe::{App, Frame, NativeOptions, egui};
 use rust_core::{
     CurseForgeProjectDetails, CurseForgeSearchHit, LaunchProfile, LicensedMicrosoftAccount,
@@ -369,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 19;
+const LAUNCHER_VERSION_BUILD: u32 = 20;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -1907,10 +1908,17 @@ impl PrismarineApp {
             } else {
                 "offline".to_string()
             };
-            let icon_url = Some(format!(
-                "https://api.mcsrvstat.us/icon/{}",
-                percent_encode_query(&addr)
-            ));
+            let icon_url = json
+                .get("icon")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    Some(format!(
+                        "https://api.mcsrvstat.us/icon/{}",
+                        percent_encode_query(&addr)
+                    ))
+                });
             let _ = tx.send(ServerPingEvent::Ready {
                 key,
                 address: addr,
@@ -5626,11 +5634,62 @@ impl PrismarineApp {
         None
     }
 
+    fn cache_data_icon_path(&self, data_uri: &str) -> Option<String> {
+        let raw = data_uri.trim();
+        if !raw.starts_with("data:image/") {
+            return None;
+        }
+        let (meta, payload) = raw.split_once(',')?;
+        if !meta.to_ascii_lowercase().contains(";base64") {
+            return None;
+        }
+        let lower_meta = meta.to_ascii_lowercase();
+        let ext = if lower_meta.starts_with("data:image/png") {
+            "png"
+        } else if lower_meta.starts_with("data:image/jpeg")
+            || lower_meta.starts_with("data:image/jpg")
+        {
+            "jpg"
+        } else if lower_meta.starts_with("data:image/webp") {
+            "webp"
+        } else if lower_meta.starts_with("data:image/gif") {
+            "gif"
+        } else {
+            "png"
+        };
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        raw.hash(&mut h);
+        let path = self.data_root.join("cache").join("ui_icons").join(format!(
+            "{:016x}.{}",
+            h.finish(),
+            ext
+        ));
+        if path.is_file() {
+            return Some(path.display().to_string());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload.trim())
+            .ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(&path, &bytes).ok()?;
+        Some(path.display().to_string())
+    }
+
     fn ensure_icon_texture_from_source(
         &mut self,
         ctx: &egui::Context,
         icon_source: &str,
     ) -> Option<egui::TextureHandle> {
+        if icon_source.starts_with("data:image/") {
+            let local = self.cache_data_icon_path(icon_source)?;
+            return self.ensure_icon_texture(ctx, &local);
+        }
         if icon_source.starts_with("http://") || icon_source.starts_with("https://") {
             let local = self.cache_remote_icon_path(icon_source)?;
             return self.ensure_icon_texture(ctx, &local);
