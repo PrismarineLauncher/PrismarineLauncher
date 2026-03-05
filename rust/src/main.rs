@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 34;
+const LAUNCHER_VERSION_BUILD: u32 = 35;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -5859,27 +5859,27 @@ impl PrismarineApp {
             "fabric" => self.ensure_builtin_icon_texture(
                 ctx,
                 "loader_icon_fabric",
-                include_bytes!("../ui/assets/loader_icons/fabric.png"),
+                include_bytes!("../assets/loader_icons/fabric.png"),
             ),
             "forge" => self.ensure_builtin_icon_texture(
                 ctx,
                 "loader_icon_forge",
-                include_bytes!("../ui/assets/loader_icons/forge.png"),
+                include_bytes!("../assets/loader_icons/forge.png"),
             ),
             "quilt" => self.ensure_builtin_icon_texture(
                 ctx,
                 "loader_icon_quilt",
-                include_bytes!("../ui/assets/loader_icons/quilt.png"),
+                include_bytes!("../assets/loader_icons/quilt.png"),
             ),
             "neoforge" => self.ensure_builtin_icon_texture(
                 ctx,
                 "loader_icon_neoforge",
-                include_bytes!("../ui/assets/loader_icons/neoforge.png"),
+                include_bytes!("../assets/loader_icons/neoforge.png"),
             ),
             _ => self.ensure_builtin_icon_texture(
                 ctx,
                 "loader_icon_vanilla",
-                include_bytes!("../ui/assets/loader_icons/vanilla.png"),
+                include_bytes!("../assets/loader_icons/vanilla.png"),
             ),
         }
     }
@@ -8045,31 +8045,31 @@ impl PrismarineApp {
                                 "Vanilla",
                                 "builtin_vanilla",
                                 "set_icon_builtin_vanilla",
-                                include_bytes!("../ui/assets/loader_icons/vanilla.png").as_slice(),
+                                include_bytes!("../assets/loader_icons/vanilla.png").as_slice(),
                             ),
                             (
                                 "Fabric",
                                 "builtin_fabric",
                                 "set_icon_builtin_fabric",
-                                include_bytes!("../ui/assets/loader_icons/fabric.png").as_slice(),
+                                include_bytes!("../assets/loader_icons/fabric.png").as_slice(),
                             ),
                             (
                                 "Forge",
                                 "builtin_forge",
                                 "set_icon_builtin_forge",
-                                include_bytes!("../ui/assets/loader_icons/forge.png").as_slice(),
+                                include_bytes!("../assets/loader_icons/forge.png").as_slice(),
                             ),
                             (
                                 "Quilt",
                                 "builtin_quilt",
                                 "set_icon_builtin_quilt",
-                                include_bytes!("../ui/assets/loader_icons/quilt.png").as_slice(),
+                                include_bytes!("../assets/loader_icons/quilt.png").as_slice(),
                             ),
                             (
                                 "NeoForge",
                                 "builtin_neoforge",
                                 "set_icon_builtin_neoforge",
-                                include_bytes!("../ui/assets/loader_icons/neoforge.png").as_slice(),
+                                include_bytes!("../assets/loader_icons/neoforge.png").as_slice(),
                             ),
                         ];
                         let tile_w = 118.0;
@@ -8367,23 +8367,23 @@ impl PrismarineApp {
                             } else {
                                 let builtin_bytes = match icon_key.as_str() {
                                     "builtin_vanilla" => Some(
-                                        include_bytes!("../ui/assets/loader_icons/vanilla.png")
+                                        include_bytes!("../assets/loader_icons/vanilla.png")
                                             .as_slice(),
                                     ),
                                     "builtin_fabric" => Some(
-                                        include_bytes!("../ui/assets/loader_icons/fabric.png")
+                                        include_bytes!("../assets/loader_icons/fabric.png")
                                             .as_slice(),
                                     ),
                                     "builtin_forge" => Some(
-                                        include_bytes!("../ui/assets/loader_icons/forge.png")
+                                        include_bytes!("../assets/loader_icons/forge.png")
                                             .as_slice(),
                                     ),
                                     "builtin_quilt" => Some(
-                                        include_bytes!("../ui/assets/loader_icons/quilt.png")
+                                        include_bytes!("../assets/loader_icons/quilt.png")
                                             .as_slice(),
                                     ),
                                     "builtin_neoforge" => Some(
-                                        include_bytes!("../ui/assets/loader_icons/neoforge.png")
+                                        include_bytes!("../assets/loader_icons/neoforge.png")
                                             .as_slice(),
                                     ),
                                     _ => None,
