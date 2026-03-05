@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 20;
+const LAUNCHER_VERSION_BUILD: u32 = 21;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -6217,7 +6217,7 @@ impl PrismarineApp {
         });
         egui::SidePanel::left("content_categories_left")
             .resizable(false)
-            .exact_width(98.0)
+            .exact_width(128.0)
             .show_inside(ui, |ui| {
                 let items: &[(DownloadContentType, &str, &str)] = &[
                     (
@@ -6251,19 +6251,19 @@ impl PrismarineApp {
                         "https://minecraft.wiki/images/Painting_JE2_BE2.png?45334?download",
                     ),
                 ];
-                for (idx, (kind, title, icon_url)) in items.iter().enumerate() {
+                for (kind, title, icon_url) in items {
                     let selected = self.download_content_type == *kind;
                     let mut clicked = false;
                     ui.scope(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.spacing_mut().button_padding = egui::vec2(2.0, 0.0);
-                        ui.vertical_centered(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+                        ui.spacing_mut().button_padding = egui::vec2(4.0, 3.0);
+                        ui.horizontal(|ui| {
                             if let Some(tex) =
                                 self.ensure_icon_texture_from_source(ui.ctx(), icon_url)
                             {
                                 if ui
                                     .add(
-                                        egui::Button::image((tex.id(), egui::vec2(22.0, 22.0)))
+                                        egui::Button::image((tex.id(), egui::vec2(30.0, 30.0)))
                                             .selected(selected),
                                     )
                                     .clicked()
@@ -6271,11 +6271,11 @@ impl PrismarineApp {
                                     clicked = true;
                                 }
                             }
-                            let label = truncate_with_ellipsis(title, 15);
+                            let label = truncate_with_ellipsis(title, 18);
                             if ui
                                 .add_sized(
-                                    [86.0, 13.0],
-                                    egui::Button::new(egui::RichText::new(label).size(10.5))
+                                    [88.0, 30.0],
+                                    egui::Button::new(egui::RichText::new(label).size(15.0))
                                         .selected(selected)
                                         .frame(false),
                                 )
@@ -6305,20 +6305,6 @@ impl PrismarineApp {
                         ) {
                             self.show_download_panel = false;
                         }
-                    }
-                    if idx + 1 < items.len() {
-                        let (sep_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), 0.0),
-                            egui::Sense::hover(),
-                        );
-                        let y = sep_rect.center().y;
-                        ui.painter().line_segment(
-                            [egui::pos2(sep_rect.left(), y), egui::pos2(sep_rect.right(), y)],
-                            egui::Stroke::new(
-                                1.0,
-                                ui.visuals().widgets.noninteractive.bg_stroke.color,
-                            ),
-                        );
                     }
                 }
             });
@@ -6666,21 +6652,28 @@ impl PrismarineApp {
                     });
                 } else if self.download_content_type == DownloadContentType::Servers {
                     let table_font_size = 17.0;
-                    let row_height = ui.text_style_height(&egui::TextStyle::Body).max(28.0);
-                    let icon_size = 38.0;
-                    let total_width = ui.available_width().max(520.0);
-                    let col_name = (total_width * 0.56).max(300.0);
-                    let col_addr = (total_width * 0.28).max(180.0);
-                    let col_online = (total_width - col_name - col_addr).max(80.0);
+                    let row_height = ui.text_style_height(&egui::TextStyle::Body).max(40.0);
+                    let icon_size = 44.0;
+                    let total_width = ui.available_width().max(620.0);
+                    let col_image = 72.0;
+                    let col_name = (total_width * 0.42).max(260.0);
+                    let col_addr = (total_width * 0.38).max(230.0);
+                    let col_online = (total_width - col_image - col_name - col_addr).max(90.0);
                     let mut scroll = egui::ScrollArea::vertical().id_salt("servers_table_scroll");
                     if self.show_download_panel {
                         scroll = scroll.max_height(top_panel_max_height);
                     }
                     scroll.show(ui, |ui| {
                         egui::Grid::new("servers_table_grid")
-                            .num_columns(3)
+                            .num_columns(4)
                             .striped(true)
                             .show(ui, |ui| {
+                                ui.add_sized(
+                                    [col_image, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Image").size(table_font_size),
+                                    ),
+                                );
                                 ui.add_sized(
                                     [col_name, 0.0],
                                     egui::Label::new(
@@ -6708,34 +6701,34 @@ impl PrismarineApp {
                                     let online = item.updated_at.clone();
                                     let icon_path = item.icon_path.clone();
 
-                                    let name_resp = ui
-                                        .allocate_ui_with_layout(
-                                            egui::vec2(col_name, row_height + 8.0),
-                                            egui::Layout::top_down(egui::Align::Center),
-                                            |ui| {
-                                                ui.horizontal_centered(|ui| {
-                                                    if let Some(tex) = self
-                                                        .ensure_content_icon_with_fallback(
-                                                            ui.ctx(),
-                                                            DownloadContentType::Servers,
-                                                            icon_path.as_deref(),
-                                                        )
-                                                    {
-                                                        ui.image((
-                                                            tex.id(),
-                                                            egui::vec2(icon_size, icon_size),
-                                                        ));
-                                                    } else {
-                                                        ui.add_space(icon_size);
-                                                    }
-                                                    ui.label(
-                                                        egui::RichText::new(display_name.as_str())
-                                                            .size(table_font_size),
-                                                    );
-                                                });
-                                            },
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(col_image, row_height + 6.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            if let Some(tex) = self
+                                                .ensure_content_icon_with_fallback(
+                                                    ui.ctx(),
+                                                    DownloadContentType::Servers,
+                                                    icon_path.as_deref(),
+                                                )
+                                            {
+                                                ui.image((
+                                                    tex.id(),
+                                                    egui::vec2(icon_size, icon_size),
+                                                ));
+                                            } else {
+                                                ui.add_space(icon_size);
+                                            }
+                                        },
+                                    );
+                                    let name_resp = ui.add_sized(
+                                        [col_name, row_height + 6.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(display_name.as_str())
+                                                .size(table_font_size),
                                         )
-                                        .response;
+                                        .truncate(),
+                                    );
                                     name_resp.context_menu(|ui| {
                                         if ui.button("Delete content").clicked() {
                                             pending_delete = Some(file_path.clone());
@@ -6744,7 +6737,7 @@ impl PrismarineApp {
                                     });
 
                                     ui.add_sized(
-                                        [col_addr, row_height + 8.0],
+                                        [col_addr, row_height + 6.0],
                                         egui::Label::new(
                                             egui::RichText::new(addr.as_str())
                                                 .size(table_font_size),
@@ -6752,7 +6745,7 @@ impl PrismarineApp {
                                         .truncate(),
                                     );
                                     ui.add_sized(
-                                        [col_online, row_height + 8.0],
+                                        [col_online, row_height + 6.0],
                                         egui::Label::new(
                                             egui::RichText::new(online.as_str())
                                                 .size(table_font_size),
