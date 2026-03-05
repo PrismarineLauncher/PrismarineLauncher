@@ -6,12 +6,13 @@ use rust_core::{
     MicrosoftDeviceCode, ModrinthProjectDetails, ModrinthSearchHit, PrismInstanceConfig,
     RuntimeDownloadProgress, build_java_command, complete_microsoft_device_login, copy_instance,
     create_instance, curseforge_get_project_details, curseforge_resolve_primary_file,
-    curseforge_search_projects_paged, default_launch_profile, delete_instance, download_file_to_path,
-    download_file_to_path_with_progress, ensure_fabric_runtime_with_progress,
-    ensure_minecraft_runtime_with_progress, format_s3_time, list_logs, list_mod_files,
-    load_launch_profile, load_prism_instance_config, modrinth_get_project_details,
-    modrinth_resolve_primary_file, modrinth_search_projects_by_type_paged, parse_s3_time,
-    read_log_preview, refresh_microsoft_account, rename_instance, save_launch_profile, scan_instances,
+    curseforge_search_projects_paged, default_launch_profile, delete_instance,
+    download_file_to_path, download_file_to_path_with_progress,
+    ensure_fabric_runtime_with_progress, ensure_minecraft_runtime_with_progress, format_s3_time,
+    list_logs, list_mod_files, load_launch_profile, load_prism_instance_config,
+    modrinth_get_project_details, modrinth_resolve_primary_file,
+    modrinth_search_projects_by_type_paged, parse_s3_time, read_log_preview,
+    refresh_microsoft_account, rename_instance, save_launch_profile, scan_instances,
     start_microsoft_device_code, sync_modrinth_managed_mods, update_installed_modrinth_mods,
     validate_minecraft_account,
 };
@@ -368,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 1;
+const LAUNCHER_VERSION_BUILD: u32 = 2;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -577,6 +578,9 @@ struct PrismarineApp {
     show_set_icon_dialog: bool,
     set_icon_target_instance_path: Option<String>,
     set_icon_dialog_section: u8,
+    set_icon_search: String,
+    set_icon_selected_kind: u8,
+    set_icon_selected_value: String,
     create_group_name: String,
     rename_group_old: String,
     rename_group_new: String,
@@ -727,6 +731,9 @@ impl Default for PrismarineApp {
             show_set_icon_dialog: false,
             set_icon_target_instance_path: None,
             set_icon_dialog_section: 0,
+            set_icon_search: String::new(),
+            set_icon_selected_kind: 0,
+            set_icon_selected_value: String::new(),
             create_group_name: String::new(),
             rename_group_old: String::new(),
             rename_group_new: String::new(),
@@ -926,7 +933,12 @@ impl PrismarineApp {
         subtitle: String,
         is_error: bool,
     ) {
-        if let Some(instance) = self.instances.iter().find(|i| i.path == instance_path).cloned() {
+        if let Some(instance) = self
+            .instances
+            .iter()
+            .find(|i| i.path == instance_path)
+            .cloned()
+        {
             self.make_launch_toast_for_instance(&instance, title, subtitle, is_error);
         } else {
             self.launch_toast = Some(LaunchToast {
@@ -986,7 +998,11 @@ impl PrismarineApp {
             self.status = "Group name must not be empty".to_string();
             return;
         }
-        if self.groups.iter().any(|g| g.name.eq_ignore_ascii_case(name)) {
+        if self
+            .groups
+            .iter()
+            .any(|g| g.name.eq_ignore_ascii_case(name))
+        {
             self.status = format!("Group already exists: {name}");
             return;
         }
@@ -1063,11 +1079,7 @@ impl PrismarineApp {
     }
 
     fn do_assign_instance_group_by_path(&mut self, instance_path: &str, group_name: &str) {
-        let Some(idx) = self
-            .instances
-            .iter()
-            .position(|x| x.path == instance_path)
-        else {
+        let Some(idx) = self.instances.iter().position(|x| x.path == instance_path) else {
             self.status = "Instance not found".to_string();
             return;
         };
@@ -1166,8 +1178,7 @@ impl PrismarineApp {
         }
 
         mmc_json["components"] = serde_json::Value::Array(components);
-        let mmc_text =
-            serde_json::to_string_pretty(&mmc_json).unwrap_or_else(|_| "{}".to_string());
+        let mmc_text = serde_json::to_string_pretty(&mmc_json).unwrap_or_else(|_| "{}".to_string());
         if let Err(err) = fs::write(&mmc_pack_path, mmc_text) {
             self.status = format!("Failed to update loader in mmc-pack.json: {err}");
             return;
@@ -1177,7 +1188,8 @@ impl PrismarineApp {
             .as_ref()
             .map(CreateLoader::cfg_value)
             .unwrap_or("vanilla");
-        if let Err(err) = set_instance_cfg_value(&instance_path, "ManagedLoader", Some(managed_loader))
+        if let Err(err) =
+            set_instance_cfg_value(&instance_path, "ManagedLoader", Some(managed_loader))
         {
             self.status = format!("Failed to update loader in instance.cfg: {err}");
             return;
@@ -1220,17 +1232,25 @@ impl PrismarineApp {
             return;
         }
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "ico", "webp", "gif", "svg"])
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "ico", "webp", "gif", "svg"],
+            )
             .pick_file()
         else {
             return;
         };
-        let Some(icon_key) = copy_image_to_icon_store(&self.data_root, &path, &self.instances[idx].name)
+        let Some(icon_key) =
+            copy_image_to_icon_store(&self.data_root, &path, &self.instances[idx].name)
         else {
             self.status = "Failed to import instance icon".to_string();
             return;
         };
-        match set_instance_cfg_value(Path::new(&self.instances[idx].path), "iconKey", Some(&icon_key)) {
+        match set_instance_cfg_value(
+            Path::new(&self.instances[idx].path),
+            "iconKey",
+            Some(&icon_key),
+        ) {
             Ok(_) => {
                 self.status = format!("Updated icon for {}", self.instances[idx].name);
                 self.reload_instances();
@@ -1248,6 +1268,9 @@ impl PrismarineApp {
         }
         self.set_icon_target_instance_path = Some(self.instances[idx].path.clone());
         self.set_icon_dialog_section = 0;
+        self.set_icon_search.clear();
+        self.set_icon_selected_kind = 0;
+        self.set_icon_selected_value.clear();
         self.show_set_icon_dialog = true;
     }
 
@@ -1271,12 +1294,7 @@ impl PrismarineApp {
         }
     }
 
-    fn write_builtin_icon_to_store(
-        &self,
-        key: &str,
-        ext: &str,
-        bytes: &[u8],
-    ) -> Option<String> {
+    fn write_builtin_icon_to_store(&self, key: &str, ext: &str, bytes: &[u8]) -> Option<String> {
         let icons_dir = self.data_root.join("icons");
         let _ = fs::create_dir_all(&icons_dir);
         let target = icons_dir.join(format!("{key}.{ext}"));
@@ -1325,7 +1343,10 @@ impl PrismarineApp {
                 .and_then(|x| x.to_str())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg") {
+            if matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
+            ) {
                 out.push(path.display().to_string());
             }
         }
@@ -1398,9 +1419,7 @@ impl PrismarineApp {
                     token_ok = true;
                     changed = true;
                 }
-                if !token_ok
-                    && let Some(refresh) = self.accounts[i].refresh_token.clone()
-                {
+                if !token_ok && let Some(refresh) = self.accounts[i].refresh_token.clone() {
                     match refresh_microsoft_account(MSA_CLIENT_ID, &refresh) {
                         Ok(refreshed) => {
                             self.accounts[i].name = refreshed.username;
@@ -1409,8 +1428,10 @@ impl PrismarineApp {
                             self.accounts[i].refresh_token = refreshed.refresh_token;
                             self.accounts[i].licensed = refreshed.has_minecraft_license;
                             changed = true;
-                            self.status =
-                                format!("Refreshed Microsoft session for {}", self.accounts[i].name);
+                            self.status = format!(
+                                "Refreshed Microsoft session for {}",
+                                self.accounts[i].name
+                            );
                         }
                         Err(err) => {
                             self.accounts[i].licensed = false;
@@ -1700,15 +1721,15 @@ impl PrismarineApp {
                 } else {
                     name.to_string()
                 };
-            self.accounts.push(Account {
-                name: account_name.clone(),
-                active: true,
-                account_type: AccountType::Licensed,
-                access_token: Some(token.to_string()),
-                refresh_token: None,
-                uuid: Some(validation.uuid),
-                licensed: validation.has_minecraft_license,
-            });
+                self.accounts.push(Account {
+                    name: account_name.clone(),
+                    active: true,
+                    account_type: AccountType::Licensed,
+                    access_token: Some(token.to_string()),
+                    refresh_token: None,
+                    uuid: Some(validation.uuid),
+                    licensed: validation.has_minecraft_license,
+                });
                 if let Some(last) = self.accounts.len().checked_sub(1) {
                     self.set_active_account(last);
                 }
@@ -2260,8 +2281,8 @@ impl PrismarineApp {
                 | DownloadContentType::ResourcePacks
                 | DownloadContentType::ShaderPacks
         ) {
-            self.status = "Downloads are only available for Mods/Resource Packs/Shader Packs"
-                .to_string();
+            self.status =
+                "Downloads are only available for Mods/Resource Packs/Shader Packs".to_string();
             return;
         }
         let Some(hit_idx) = self.selected_modrinth_hit else {
@@ -2309,8 +2330,8 @@ impl PrismarineApp {
                 | DownloadContentType::ResourcePacks
                 | DownloadContentType::ShaderPacks
         ) {
-            self.status = "Downloads are only available for Mods/Resource Packs/Shader Packs"
-                .to_string();
+            self.status =
+                "Downloads are only available for Mods/Resource Packs/Shader Packs".to_string();
             return;
         }
         let Some(hit_idx) = self.selected_curseforge_hit else {
@@ -2350,8 +2371,9 @@ impl PrismarineApp {
                 | DownloadContentType::ResourcePacks
                 | DownloadContentType::ShaderPacks
         ) {
-            self.status = "Direct URL download is only available for Mods/Resource Packs/Shader Packs"
-                .to_string();
+            self.status =
+                "Direct URL download is only available for Mods/Resource Packs/Shader Packs"
+                    .to_string();
             return;
         }
         let url = self.curseforge_download_url.trim().to_string();
@@ -2650,9 +2672,8 @@ impl PrismarineApp {
             (Ok(managed), Ok(installed)) => {
                 let total = managed + installed;
                 if total > 0 {
-                    self.status = format!(
-                        "Updated {total} mods ({managed} managed + {installed} installed)"
-                    );
+                    self.status =
+                        format!("Updated {total} mods ({managed} managed + {installed} installed)");
                 } else {
                     self.status = "All mods are up to date".to_string();
                 }
@@ -2665,8 +2686,9 @@ impl PrismarineApp {
                 self.status = format!("Installed mod update failed: {err}");
             }
             (Err(err1), Err(err2)) => {
-                self.status =
-                    format!("Mod auto-update failed: managed error: {err1}; installed error: {err2}");
+                self.status = format!(
+                    "Mod auto-update failed: managed error: {err1}; installed error: {err2}"
+                );
             }
         }
     }
@@ -2683,7 +2705,8 @@ impl PrismarineApp {
                 | DownloadContentType::Servers
                 | DownloadContentType::Screenshots
         ) {
-            self.status = "Add Content is available for Mods/Resource Packs/Shader Packs".to_string();
+            self.status =
+                "Add Content is available for Mods/Resource Packs/Shader Packs".to_string();
             return;
         }
         let mut dialog = rfd::FileDialog::new();
@@ -2914,7 +2937,10 @@ impl PrismarineApp {
         for component in components {
             let uid = component.get("uid").and_then(|v| v.as_str()).unwrap_or("");
             if uid == target_uid {
-                let version = component.get("version").and_then(|v| v.as_str()).unwrap_or("");
+                let version = component
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let v = version.trim();
                 if !v.is_empty() {
                     return Some(v.to_string());
@@ -2959,7 +2985,12 @@ impl PrismarineApp {
                     .filter(|p| {
                         p.extension()
                             .and_then(|e| e.to_str())
-                            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"))
+                            .map(|e| {
+                                matches!(
+                                    e.to_ascii_lowercase().as_str(),
+                                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
+                                )
+                            })
                             .unwrap_or(false)
                     })
                     .collect(),
@@ -3373,7 +3404,8 @@ impl PrismarineApp {
                 .unwrap_or_default()
                 .to_string();
             let enabled = !file_name.ends_with(".disabled");
-            let parsed_meta = self.extract_content_metadata_from_archive(&path, content_type.clone());
+            let parsed_meta =
+                self.extract_content_metadata_from_archive(&path, content_type.clone());
             let display_name = parsed_meta
                 .as_ref()
                 .map(|(n, _)| n.clone())
@@ -3504,24 +3536,38 @@ impl PrismarineApp {
             if !candidate.is_file() {
                 continue;
             }
-            let updated_at = fs::metadata(&candidate)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(format_system_time_ddmmyyyy)
-                .unwrap_or_default();
-            out.push(ContentListEntry {
-                name: "servers.dat".to_string(),
-                file_path: candidate.display().to_string(),
-                enabled: true,
-                display_name: "servers.dat".to_string(),
-                version: String::new(),
-                updated_at,
-                provider: "Local".to_string(),
-                icon_path: Some(
-                    "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download"
-                        .to_string(),
-                ),
-            });
+            let entries = parse_servers_dat_loose(&candidate);
+            if entries.is_empty() {
+                out.push(ContentListEntry {
+                    name: "servers.dat".to_string(),
+                    file_path: candidate.display().to_string(),
+                    enabled: true,
+                    display_name: "Minecraft Server".to_string(),
+                    version: "unknown".to_string(),
+                    updated_at: "...".to_string(),
+                    provider: "Local".to_string(),
+                    icon_path: Some(
+                        "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download"
+                            .to_string(),
+                    ),
+                });
+            } else {
+                for (name, addr) in entries {
+                    out.push(ContentListEntry {
+                        name: name.clone(),
+                        file_path: candidate.display().to_string(),
+                        enabled: true,
+                        display_name: name,
+                        version: addr,
+                        updated_at: "...".to_string(),
+                        provider: "Local".to_string(),
+                        icon_path: Some(
+                            "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download"
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
             break;
         }
         out
@@ -3685,7 +3731,9 @@ impl PrismarineApp {
                     let to = parent.join(to_name);
                     match fs::rename(&from, &to) {
                         Ok(_) => changed += 1,
-                        Err(err) => errors.push(format!("{} -> {}: {err}", from.display(), to.display())),
+                        Err(err) => {
+                            errors.push(format!("{} -> {}: {err}", from.display(), to.display()))
+                        }
                     }
                 } else {
                     errors.push("Invalid mod file path".to_string());
@@ -4787,7 +4835,8 @@ impl PrismarineApp {
                 }
                 let pid = child.id();
                 self.processes.insert(ctx.instance.path.clone(), child);
-                self.running_process_pids.insert(ctx.instance.path.clone(), pid);
+                self.running_process_pids
+                    .insert(ctx.instance.path.clone(), pid);
                 self.persist_running_processes();
                 self.last_stopped_instance_path = None;
                 if let Some(post) = ctx.post_exit {
@@ -5328,7 +5377,8 @@ impl PrismarineApp {
             image,
             egui::TextureOptions::NEAREST,
         );
-        self.icon_cache.insert(fallback_key.to_string(), tex.clone());
+        self.icon_cache
+            .insert(fallback_key.to_string(), tex.clone());
         tex
     }
 
@@ -5465,11 +5515,13 @@ impl PrismarineApp {
                                     egui::vec2(ui.available_width(), row_height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        out = Some(ui.add(
-                                            egui::Label::new(text)
-                                                .wrap()
-                                                .sense(egui::Sense::click_and_drag()),
-                                        ));
+                                        out = Some(
+                                            ui.add(
+                                                egui::Label::new(text)
+                                                    .wrap()
+                                                    .sense(egui::Sense::click_and_drag()),
+                                            ),
+                                        );
                                     },
                                 );
                                 out.expect("instance row response")
@@ -5674,94 +5726,95 @@ impl PrismarineApp {
             ui.separator();
             ui.label(format!("Total: {}", current_total));
         });
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                ui.vertical(|ui| {
-                    let items: &[(DownloadContentType, &str, &str)] = &[
-                        (
-                            DownloadContentType::Mods,
-                            "Mods",
-                            "https://minecraft.wiki/images/Impulse_Command_Block.gif?fb024?download",
-                        ),
-                        (
-                            DownloadContentType::ResourcePacks,
-                            "Resource Packs",
-                            "https://minecraft.wiki/images/White_Dye_JE2_BE2.png?f9a07?download",
-                        ),
-                        (
-                            DownloadContentType::ShaderPacks,
-                            "Shader Packs",
-                            "https://ru.minecraft.wiki/images/%D0%A1%D0%B2%D0%B5%D1%82%D1%8F%D1%89%D0%B8%D0%B9%D1%81%D1%8F_%D1%87%D0%B5%D1%80%D0%BD%D0%B8%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9_%D0%BC%D0%B5%D1%88%D0%BE%D0%BA_JE1.png?377c1?download",
-                        ),
-                        (
-                            DownloadContentType::Worlds,
-                            "Worlds",
-                            "https://minecraft.wiki/images/Grass_Block_JE7_BE6.png?2bd37?download",
-                        ),
-                        (
-                            DownloadContentType::Servers,
-                            "Servers",
-                            "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download",
-                        ),
-                        (
-                            DownloadContentType::Screenshots,
-                            "Screenshots",
-                            "https://minecraft.wiki/images/Painting_JE2_BE2.png?45334?download",
-                        ),
-                    ];
-                    for (idx, (kind, title, icon_url)) in items.iter().enumerate() {
-                        let selected = self.download_content_type == *kind;
-                        let mut clicked = false;
-                        ui.vertical_centered(|ui| {
-                            if let Some(tex) = self.ensure_icon_texture_from_source(ui.ctx(), icon_url)
+        egui::SidePanel::left("content_categories_left")
+            .resizable(false)
+            .exact_width(170.0)
+            .show_inside(ui, |ui| {
+                let items: &[(DownloadContentType, &str, &str)] = &[
+                    (
+                        DownloadContentType::Mods,
+                        "Mods",
+                        "https://minecraft.wiki/images/Impulse_Command_Block.gif?fb024?download",
+                    ),
+                    (
+                        DownloadContentType::ResourcePacks,
+                        "Resource Packs",
+                        "https://minecraft.wiki/images/White_Dye_JE2_BE2.png?f9a07?download",
+                    ),
+                    (
+                        DownloadContentType::ShaderPacks,
+                        "Shader Packs",
+                        "https://ru.minecraft.wiki/images/%D0%A1%D0%B2%D0%B5%D1%82%D1%8F%D1%89%D0%B8%D0%B9%D1%81%D1%8F_%D1%87%D0%B5%D1%80%D0%BD%D0%B8%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9_%D0%BC%D0%B5%D1%88%D0%BE%D0%BA_JE1.png?377c1?download",
+                    ),
+                    (
+                        DownloadContentType::Worlds,
+                        "Worlds",
+                        "https://minecraft.wiki/images/Grass_Block_JE7_BE6.png?2bd37?download",
+                    ),
+                    (
+                        DownloadContentType::Servers,
+                        "Servers",
+                        "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download",
+                    ),
+                    (
+                        DownloadContentType::Screenshots,
+                        "Screenshots",
+                        "https://minecraft.wiki/images/Painting_JE2_BE2.png?45334?download",
+                    ),
+                ];
+                for (idx, (kind, title, icon_url)) in items.iter().enumerate() {
+                    let selected = self.download_content_type == *kind;
+                    let mut clicked = false;
+                    ui.horizontal(|ui| {
+                        if let Some(tex) = self.ensure_icon_texture_from_source(ui.ctx(), icon_url) {
+                            if ui
+                                .add(
+                                    egui::Button::image((tex.id(), egui::vec2(22.0, 22.0)))
+                                        .selected(selected),
+                                )
+                                .clicked()
                             {
-                                if ui
-                                    .add(
-                                        egui::Button::image((tex.id(), egui::vec2(24.0, 24.0)))
-                                            .selected(selected),
-                                    )
-                                    .clicked()
-                                {
-                                    clicked = true;
-                                }
-                                if ui
-                                    .selectable_label(selected, egui::RichText::new(*title).size(12.0))
-                                    .clicked()
-                                {
-                                    clicked = true;
-                                }
-                            } else if ui.selectable_label(selected, *title).clicked() {
                                 clicked = true;
                             }
-                        });
-                        if clicked {
-                            self.download_content_type = kind.clone();
-                            if self.show_download_panel
-                                && matches!(
-                                    self.download_content_type,
-                                    DownloadContentType::Mods
-                                        | DownloadContentType::ResourcePacks
-                                        | DownloadContentType::ShaderPacks
-                                )
-                            {
-                                self.request_selected_download_details();
-                                self.start_download_search(false);
-                            } else if !matches!(
+                        }
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 24.0],
+                                egui::Button::new(egui::RichText::new(*title).size(16.0))
+                                    .selected(selected)
+                                    .frame(false),
+                            )
+                            .clicked()
+                        {
+                            clicked = true;
+                        }
+                    });
+                    if clicked {
+                        self.download_content_type = kind.clone();
+                        if self.show_download_panel
+                            && matches!(
                                 self.download_content_type,
                                 DownloadContentType::Mods
                                     | DownloadContentType::ResourcePacks
                                     | DownloadContentType::ShaderPacks
-                            ) {
-                                self.show_download_panel = false;
-                            }
-                        }
-                        if idx + 1 < items.len() {
-                            ui.separator();
+                            )
+                        {
+                            self.request_selected_download_details();
+                            self.start_download_search(false);
+                        } else if !matches!(
+                            self.download_content_type,
+                            DownloadContentType::Mods
+                                | DownloadContentType::ResourcePacks
+                                | DownloadContentType::ShaderPacks
+                        ) {
+                            self.show_download_panel = false;
                         }
                     }
-                });
+                    if idx + 1 < items.len() {
+                        ui.separator();
+                    }
+                }
             });
-        });
         ui.horizontal(|ui| {
             ui.label(search_label);
             ui.text_edit_singleline(&mut self.mods_filter);
@@ -5783,9 +5836,8 @@ impl PrismarineApp {
         if self.show_download_panel {
             let avail = ui.available_height().max(360.0);
             split_total_height = avail;
-            let upper = (avail - 180.0).max(180.0);
-            top_panel_max_height =
-                (avail * self.content_list_ratio).clamp(140.0, upper);
+            let upper = (avail - 120.0).max(120.0);
+            top_panel_max_height = (avail * self.content_list_ratio).clamp(72.0, upper);
         }
 
         let mut pending_delete: Option<String> = None;
@@ -5827,17 +5879,21 @@ impl PrismarineApp {
                     scroll = scroll.max_height(top_panel_max_height);
                 }
                 scroll.show(ui, |ui| {
-                        egui::Grid::new("mods_table_grid")
-                            .num_columns(6)
-                            .striped(true)
-                            .show(ui, |ui| {
+                    egui::Grid::new("mods_table_grid")
+                        .num_columns(6)
+                        .striped(true)
+                        .show(ui, |ui| {
                             ui.add_sized(
                                 [col_enable, 0.0],
-                                egui::Label::new(egui::RichText::new("Enable").size(table_font_size)),
+                                egui::Label::new(
+                                    egui::RichText::new("Enable").size(table_font_size),
+                                ),
                             );
                             ui.add_sized(
                                 [col_image, 0.0],
-                                egui::Label::new(egui::RichText::new("Image").size(table_font_size)),
+                                egui::Label::new(
+                                    egui::RichText::new("Image").size(table_font_size),
+                                ),
                             );
                             ui.add_sized(
                                 [col_name, 0.0],
@@ -5845,20 +5901,34 @@ impl PrismarineApp {
                             );
                             ui.add_sized(
                                 [col_version, 0.0],
-                                egui::Label::new(egui::RichText::new("Version").size(table_font_size)),
+                                egui::Label::new(
+                                    egui::RichText::new("Version").size(table_font_size),
+                                ),
                             );
                             ui.add_sized(
                                 [col_updated, 0.0],
-                                egui::Label::new(egui::RichText::new("Updated").size(table_font_size)),
+                                egui::Label::new(
+                                    egui::RichText::new("Updated").size(table_font_size),
+                                ),
                             );
                             ui.add_sized(
                                 [col_provider, 0.0],
-                                egui::Label::new(egui::RichText::new("Provider").size(table_font_size)),
+                                egui::Label::new(
+                                    egui::RichText::new("Provider").size(table_font_size),
+                                ),
                             );
                             ui.end_row();
 
                             for idx in &filtered_mod_indices {
-                                let (enabled_now, file_path, icon_path, display_name, version, updated_at, provider) = {
+                                let (
+                                    enabled_now,
+                                    file_path,
+                                    icon_path,
+                                    display_name,
+                                    version,
+                                    updated_at,
+                                    provider,
+                                ) = {
                                     let item = &self.mods_cache[*idx];
                                     (
                                         item.enabled,
@@ -5886,10 +5956,14 @@ impl PrismarineApp {
                                     egui::Layout::left_to_right(egui::Align::Min),
                                     |ui| {
                                         if let Some(icon_path) = &icon_path {
-                                            if let Some(tex) = self
-                                                .ensure_icon_texture_from_source(ui.ctx(), icon_path)
-                                            {
-                                                ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                                            if let Some(tex) = self.ensure_icon_texture_from_source(
+                                                ui.ctx(),
+                                                icon_path,
+                                            ) {
+                                                ui.image((
+                                                    tex.id(),
+                                                    egui::vec2(icon_size, icon_size),
+                                                ));
                                             } else {
                                                 ui.add_space(icon_size);
                                             }
@@ -5901,7 +5975,8 @@ impl PrismarineApp {
                                 let name_resp = ui.add_sized(
                                     [col_name, row_height + 2.0],
                                     egui::Label::new(
-                                        egui::RichText::new(display_name.as_str()).size(table_font_size),
+                                        egui::RichText::new(display_name.as_str())
+                                            .size(table_font_size),
                                     )
                                     .truncate(),
                                 );
@@ -5925,17 +6000,20 @@ impl PrismarineApp {
                                         egui::RichText::new(compact_mod_version(&version))
                                             .size(table_font_size),
                                     )
-                                        .truncate(),
+                                    .truncate(),
                                 );
                                 ui.add_sized(
                                     [col_updated, row_height + 2.0],
-                                    egui::Label::new(egui::RichText::new(updated_at).size(table_font_size))
-                                        .truncate(),
+                                    egui::Label::new(
+                                        egui::RichText::new(updated_at).size(table_font_size),
+                                    )
+                                    .truncate(),
                                 );
                                 ui.add_sized(
                                     [col_provider, row_height + 2.0],
                                     egui::Label::new(
-                                        egui::RichText::new(provider.as_str()).size(table_font_size),
+                                        egui::RichText::new(provider.as_str())
+                                            .size(table_font_size),
                                     )
                                     .truncate(),
                                 );
@@ -5986,140 +6064,327 @@ impl PrismarineApp {
                 };
                 ui.label(msg);
             } else {
-                let table_font_size = 17.0;
-                let row_height = ui.text_style_height(&egui::TextStyle::Body).max(24.0);
-                let icon_size = (row_height + 2.0) * 1.3;
-                let total_width = ui.available_width().max(520.0);
-                let col_enable = 72.0;
-                let col_image = 44.0;
-                let col_version = 150.0;
-                let col_updated = 130.0;
-                let col_provider = 110.0;
-                let spacing = ui.spacing().item_spacing.x;
-                let fixed = col_enable + col_image + col_version + col_updated + col_provider;
-                let gaps = 5.0 * spacing;
-                let col_name = (total_width - fixed - gaps).max(220.0);
-                let mut scroll = egui::ScrollArea::vertical().id_salt("content_table_scroll");
-                if self.show_download_panel {
-                    scroll = scroll.max_height(top_panel_max_height);
-                }
-                scroll.show(ui, |ui| {
-                    egui::Grid::new("content_table_grid")
-                        .num_columns(6)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            ui.add_sized(
-                                [col_enable, 0.0],
-                                egui::Label::new(egui::RichText::new("Enable").size(table_font_size)),
-                            );
-                            ui.add_sized(
-                                [col_image, 0.0],
-                                egui::Label::new(egui::RichText::new("Image").size(table_font_size)),
-                            );
-                            ui.add_sized(
-                                [col_name, 0.0],
-                                egui::Label::new(egui::RichText::new("Name").size(table_font_size)),
-                            );
-                            ui.add_sized(
-                                [col_version, 0.0],
-                                egui::Label::new(egui::RichText::new("Version").size(table_font_size)),
-                            );
-                            ui.add_sized(
-                                [col_updated, 0.0],
-                                egui::Label::new(egui::RichText::new("Updated").size(table_font_size)),
-                            );
-                            ui.add_sized(
-                                [col_provider, 0.0],
-                                egui::Label::new(egui::RichText::new("Provider").size(table_font_size)),
-                            );
-                            ui.end_row();
-
-                            for item in &filtered {
-                                let enabled_now = item.enabled;
-                                let file_path = item.file_path.clone();
-                                let icon_path = item.icon_path.clone();
-                                let display_name = item.display_name.clone();
-                                let version = item.version.clone();
-                                let updated_at = item.updated_at.clone();
-                                let provider = item.provider.clone();
-
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(col_enable, row_height + 2.0),
-                                    egui::Layout::left_to_right(egui::Align::Min),
-                                    |ui| {
-                                        if supports_toggle {
-                                            let mut enabled = enabled_now;
-                                            if ui.checkbox(&mut enabled, "").changed() {
-                                                pending_toggle = Some((file_path.clone(), enabled));
-                                            }
-                                        } else {
-                                            ui.add_space(18.0);
+                if self.download_content_type == DownloadContentType::Screenshots {
+                    let tile_w = 180.0;
+                    let thumb_w = 150.0;
+                    let thumb_h = 84.0;
+                    let total_w = ui.available_width().max(tile_w);
+                    let cols = ((total_w / tile_w).floor() as usize).max(1);
+                    let mut scroll =
+                        egui::ScrollArea::vertical().id_salt("screenshots_grid_scroll");
+                    if self.show_download_panel {
+                        scroll = scroll.max_height(top_panel_max_height);
+                    }
+                    scroll.show(ui, |ui| {
+                        egui::Grid::new("screenshots_grid")
+                            .num_columns(cols)
+                            .spacing([14.0, 14.0])
+                            .show(ui, |ui| {
+                                for (idx, item) in filtered.iter().enumerate() {
+                                    let file_path = item.file_path.clone();
+                                    let mut label = item.display_name.clone();
+                                    if let Some(stem) =
+                                        Path::new(&label).file_stem().and_then(|x| x.to_str())
+                                    {
+                                        label = stem.to_string();
+                                    }
+                                    ui.vertical(|ui| {
+                                        let mut image_resp = ui.allocate_response(
+                                            egui::vec2(thumb_w, thumb_h),
+                                            egui::Sense::click(),
+                                        );
+                                        if let Some(icon_path) = &item.icon_path
+                                            && let Some(tex) = self.ensure_icon_texture_from_source(
+                                                ui.ctx(),
+                                                icon_path,
+                                            )
+                                        {
+                                            image_resp = ui.add(
+                                                egui::Image::new((
+                                                    tex.id(),
+                                                    egui::vec2(thumb_w, thumb_h),
+                                                ))
+                                                .sense(egui::Sense::click()),
+                                            );
                                         }
-                                    },
+                                        if image_resp.double_clicked() {
+                                            self.copy_image_file_to_clipboard(&file_path);
+                                        }
+                                        image_resp.context_menu(|ui| {
+                                            if ui.button("Copy screenshot").clicked() {
+                                                self.copy_image_file_to_clipboard(&file_path);
+                                                ui.close();
+                                            }
+                                            if ui.button("Delete content").clicked() {
+                                                pending_delete = Some(file_path.clone());
+                                                ui.close();
+                                            }
+                                        });
+                                        ui.label(
+                                            egui::RichText::new(label)
+                                                .size(13.0)
+                                                .color(ui.visuals().text_color()),
+                                        );
+                                    });
+                                    if idx % cols == cols - 1 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    });
+                } else if self.download_content_type == DownloadContentType::Servers {
+                    let table_font_size = 17.0;
+                    let row_height = ui.text_style_height(&egui::TextStyle::Body).max(28.0);
+                    let icon_size = 38.0;
+                    let total_width = ui.available_width().max(520.0);
+                    let col_name = (total_width * 0.56).max(300.0);
+                    let col_addr = (total_width * 0.28).max(180.0);
+                    let col_online = (total_width - col_name - col_addr).max(80.0);
+                    let mut scroll = egui::ScrollArea::vertical().id_salt("servers_table_scroll");
+                    if self.show_download_panel {
+                        scroll = scroll.max_height(top_panel_max_height);
+                    }
+                    scroll.show(ui, |ui| {
+                        egui::Grid::new("servers_table_grid")
+                            .num_columns(3)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.add_sized(
+                                    [col_name, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Name").size(table_font_size),
+                                    ),
                                 );
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(col_image, row_height + 2.0),
-                                    egui::Layout::left_to_right(egui::Align::Min),
-                                    |ui| {
-                                        if let Some(icon_path) = &icon_path {
-                                            if let Some(tex) =
-                                                self.ensure_icon_texture_from_source(ui.ctx(), icon_path)
-                                            {
-                                                ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                                ui.add_sized(
+                                    [col_addr, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Address").size(table_font_size),
+                                    ),
+                                );
+                                ui.add_sized(
+                                    [col_online, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Online").size(table_font_size),
+                                    ),
+                                );
+                                ui.end_row();
+
+                                for item in &filtered {
+                                    let file_path = item.file_path.clone();
+                                    let display_name = item.display_name.clone();
+                                    let addr = item.version.clone();
+                                    let online = item.updated_at.clone();
+                                    let icon_path = item.icon_path.clone();
+
+                                    let name_resp = ui
+                                        .allocate_ui_with_layout(
+                                            egui::vec2(col_name, row_height + 8.0),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                if let Some(icon) = &icon_path {
+                                                    if let Some(tex) = self
+                                                        .ensure_icon_texture_from_source(
+                                                            ui.ctx(),
+                                                            icon,
+                                                        )
+                                                    {
+                                                        ui.image((
+                                                            tex.id(),
+                                                            egui::vec2(icon_size, icon_size),
+                                                        ));
+                                                    } else {
+                                                        ui.add_space(icon_size);
+                                                    }
+                                                } else {
+                                                    ui.add_space(icon_size);
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new(display_name.as_str())
+                                                        .size(table_font_size),
+                                                );
+                                            },
+                                        )
+                                        .response;
+                                    name_resp.context_menu(|ui| {
+                                        if ui.button("Delete content").clicked() {
+                                            pending_delete = Some(file_path.clone());
+                                            ui.close();
+                                        }
+                                    });
+
+                                    ui.add_sized(
+                                        [col_addr, row_height + 8.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(addr.as_str())
+                                                .size(table_font_size),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.add_sized(
+                                        [col_online, row_height + 8.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(online.as_str())
+                                                .size(table_font_size),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                } else {
+                    let table_font_size = 17.0;
+                    let row_height = ui.text_style_height(&egui::TextStyle::Body).max(24.0);
+                    let icon_size = (row_height + 2.0) * 1.3;
+                    let total_width = ui.available_width().max(520.0);
+                    let col_enable = 72.0;
+                    let col_image = 44.0;
+                    let col_version = 150.0;
+                    let col_updated = 130.0;
+                    let col_provider = 110.0;
+                    let spacing = ui.spacing().item_spacing.x;
+                    let fixed = col_enable + col_image + col_version + col_updated + col_provider;
+                    let gaps = 5.0 * spacing;
+                    let col_name = (total_width - fixed - gaps).max(220.0);
+                    let mut scroll = egui::ScrollArea::vertical().id_salt("content_table_scroll");
+                    if self.show_download_panel {
+                        scroll = scroll.max_height(top_panel_max_height);
+                    }
+                    scroll.show(ui, |ui| {
+                        egui::Grid::new("content_table_grid")
+                            .num_columns(6)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.add_sized(
+                                    [col_enable, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Enable").size(table_font_size),
+                                    ),
+                                );
+                                ui.add_sized(
+                                    [col_image, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Image").size(table_font_size),
+                                    ),
+                                );
+                                ui.add_sized(
+                                    [col_name, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Name").size(table_font_size),
+                                    ),
+                                );
+                                ui.add_sized(
+                                    [col_version, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Version").size(table_font_size),
+                                    ),
+                                );
+                                ui.add_sized(
+                                    [col_updated, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Updated").size(table_font_size),
+                                    ),
+                                );
+                                ui.add_sized(
+                                    [col_provider, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new("Provider").size(table_font_size),
+                                    ),
+                                );
+                                ui.end_row();
+
+                                for item in &filtered {
+                                    let enabled_now = item.enabled;
+                                    let file_path = item.file_path.clone();
+                                    let icon_path = item.icon_path.clone();
+                                    let display_name = item.display_name.clone();
+                                    let version = item.version.clone();
+                                    let updated_at = item.updated_at.clone();
+                                    let provider = item.provider.clone();
+
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(col_enable, row_height + 2.0),
+                                        egui::Layout::left_to_right(egui::Align::Min),
+                                        |ui| {
+                                            if supports_toggle {
+                                                let mut enabled = enabled_now;
+                                                if ui.checkbox(&mut enabled, "").changed() {
+                                                    pending_toggle =
+                                                        Some((file_path.clone(), enabled));
+                                                }
+                                            } else {
+                                                ui.add_space(18.0);
+                                            }
+                                        },
+                                    );
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(col_image, row_height + 2.0),
+                                        egui::Layout::left_to_right(egui::Align::Min),
+                                        |ui| {
+                                            if let Some(icon_path) = &icon_path {
+                                                if let Some(tex) = self
+                                                    .ensure_icon_texture_from_source(
+                                                        ui.ctx(),
+                                                        icon_path,
+                                                    )
+                                                {
+                                                    ui.image((
+                                                        tex.id(),
+                                                        egui::vec2(icon_size, icon_size),
+                                                    ));
+                                                } else {
+                                                    ui.add_space(icon_size);
+                                                }
                                             } else {
                                                 ui.add_space(icon_size);
                                             }
-                                        } else {
-                                            ui.add_space(icon_size);
-                                        }
-                                    },
-                                );
-                                let name_resp = ui.add_sized(
-                                    [col_name, row_height + 2.0],
-                                    egui::Label::new(
-                                        egui::RichText::new(display_name.as_str()).size(table_font_size),
-                                    )
-                                    .truncate(),
-                                );
-                                name_resp.context_menu(|ui| {
-                                    if self.download_content_type == DownloadContentType::Screenshots
-                                        && ui.button("Copy screenshot").clicked()
-                                    {
-                                        self.copy_image_file_to_clipboard(&file_path);
-                                        ui.close();
-                                    }
-                                    if ui.button("Delete content").clicked() {
-                                        pending_delete = Some(file_path.clone());
-                                        ui.close();
-                                    }
-                                });
-                                if name_resp.hovered() {
-                                    name_resp.on_hover_text(display_name.clone());
-                                }
-                                ui.add_sized(
-                                    [col_version, row_height + 2.0],
-                                    egui::Label::new(
-                                        egui::RichText::new(compact_mod_version(&version))
-                                            .size(table_font_size),
-                                    )
-                                    .truncate(),
-                                );
-                                ui.add_sized(
-                                    [col_updated, row_height + 2.0],
-                                    egui::Label::new(egui::RichText::new(updated_at).size(table_font_size))
+                                        },
+                                    );
+                                    let name_resp = ui.add_sized(
+                                        [col_name, row_height + 2.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(display_name.as_str())
+                                                .size(table_font_size),
+                                        )
                                         .truncate(),
-                                );
-                                ui.add_sized(
-                                    [col_provider, row_height + 2.0],
-                                    egui::Label::new(
-                                        egui::RichText::new(provider.as_str()).size(table_font_size),
-                                    )
-                                    .truncate(),
-                                );
-                                ui.end_row();
-                            }
-                        });
-                });
+                                    );
+                                    name_resp.context_menu(|ui| {
+                                        if ui.button("Delete content").clicked() {
+                                            pending_delete = Some(file_path.clone());
+                                            ui.close();
+                                        }
+                                    });
+                                    if name_resp.hovered() {
+                                        name_resp.on_hover_text(display_name.clone());
+                                    }
+                                    ui.add_sized(
+                                        [col_version, row_height + 2.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(compact_mod_version(&version))
+                                                .size(table_font_size),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.add_sized(
+                                        [col_updated, row_height + 2.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(updated_at).size(table_font_size),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.add_sized(
+                                        [col_provider, row_height + 2.0],
+                                        egui::Label::new(
+                                            egui::RichText::new(provider.as_str())
+                                                .size(table_font_size),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                }
             }
             if let Some((file_path, enabled)) = pending_toggle {
                 self.do_toggle_content_enabled(&file_path, enabled);
@@ -6145,7 +6410,7 @@ impl PrismarineApp {
             if split_resp.dragged() && split_total_height > 1.0 {
                 self.content_list_ratio = (self.content_list_ratio
                     + split_resp.drag_delta().y / split_total_height)
-                    .clamp(0.30, 0.80);
+                    .clamp(0.08, 0.92);
             }
         }
 
@@ -6160,7 +6425,11 @@ impl PrismarineApp {
             let mut close_downloads = false;
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✕").on_hover_text("Hide Downloads").clicked() {
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("Hide Downloads")
+                        .clicked()
+                    {
                         close_downloads = true;
                     }
                 });
@@ -6274,13 +6543,17 @@ impl PrismarineApp {
                                                     let hit = &self.modrinth_hits[idx];
                                                     let mut label = hit.title.clone();
                                                     if !hit.author.trim().is_empty() {
-                                                        label.push_str(&format!(" ({})", hit.author));
+                                                        label.push_str(&format!(
+                                                            " ({})",
+                                                            hit.author
+                                                        ));
                                                     } else {
                                                         label.push_str(&format!(" ({})", hit.slug));
                                                     }
                                                     (hit.icon_url.clone(), label)
                                                 };
-                                                let selected = self.selected_modrinth_hit == Some(idx);
+                                                let selected =
+                                                    self.selected_modrinth_hit == Some(idx);
                                                 let row_resp = ui
                                                     .horizontal(|ui| {
                                                         if let Some(icon) = &icon_url {
@@ -6303,12 +6576,14 @@ impl PrismarineApp {
                                                         } else {
                                                             ui.add_space(list_icon_size);
                                                         }
-                                                        let text_width = ui.available_width().max(80.0);
-                                                        let max_chars =
-                                                            ((text_width / 9.0).floor() as usize)
-                                                                .max(12);
-                                                        let label_short =
-                                                            truncate_with_ellipsis(&label, max_chars);
+                                                        let text_width =
+                                                            ui.available_width().max(80.0);
+                                                        let max_chars = ((text_width / 9.0).floor()
+                                                            as usize)
+                                                            .max(12);
+                                                        let label_short = truncate_with_ellipsis(
+                                                            &label, max_chars,
+                                                        );
                                                         let response = ui.add_sized(
                                                             [text_width, list_row_height],
                                                             egui::Button::new(
@@ -6368,8 +6643,8 @@ impl PrismarineApp {
                                     .max_height(panel_height)
                                     .show(ui, |ui| {
                                         if let Some(icon) = details_icon.as_deref()
-                                            && let Some(tex) = self
-                                                .ensure_icon_texture_from_source(ui.ctx(), icon)
+                                            && let Some(tex) =
+                                                self.ensure_icon_texture_from_source(ui.ctx(), icon)
                                         {
                                             ui.image((tex.id(), egui::vec2(56.0, 56.0)));
                                         }
@@ -6462,7 +6737,10 @@ impl PrismarineApp {
                                                     let hit = &self.curseforge_hits[idx];
                                                     let mut label = hit.title.clone();
                                                     if !hit.author.trim().is_empty() {
-                                                        label.push_str(&format!(" ({})", hit.author));
+                                                        label.push_str(&format!(
+                                                            " ({})",
+                                                            hit.author
+                                                        ));
                                                     }
                                                     (hit.icon_url.clone(), label)
                                                 };
@@ -6490,12 +6768,14 @@ impl PrismarineApp {
                                                         } else {
                                                             ui.add_space(list_icon_size);
                                                         }
-                                                        let text_width = ui.available_width().max(80.0);
-                                                        let max_chars =
-                                                            ((text_width / 9.0).floor() as usize)
-                                                                .max(12);
-                                                        let label_short =
-                                                            truncate_with_ellipsis(&label, max_chars);
+                                                        let text_width =
+                                                            ui.available_width().max(80.0);
+                                                        let max_chars = ((text_width / 9.0).floor()
+                                                            as usize)
+                                                            .max(12);
+                                                        let label_short = truncate_with_ellipsis(
+                                                            &label, max_chars,
+                                                        );
                                                         let response = ui.add_sized(
                                                             [text_width, list_row_height],
                                                             egui::Button::new(
@@ -6555,8 +6835,8 @@ impl PrismarineApp {
                                     .max_height(panel_height)
                                     .show(ui, |ui| {
                                         if let Some(icon) = details_icon.as_deref()
-                                            && let Some(tex) = self
-                                                .ensure_icon_texture_from_source(ui.ctx(), icon)
+                                            && let Some(tex) =
+                                                self.ensure_icon_texture_from_source(ui.ctx(), icon)
                                         {
                                             ui.image((tex.id(), egui::vec2(56.0, 56.0)));
                                         }
@@ -6643,13 +6923,13 @@ impl PrismarineApp {
                 "Selected Instance",
             );
             ui.separator();
-            ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::General, "General");
-            ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::Java, "Java");
             ui.selectable_value(
                 &mut self.settings_subtab,
-                SettingsSubTab::Launch,
-                "Launch",
+                SettingsSubTab::General,
+                "General",
             );
+            ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::Java, "Java");
+            ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::Launch, "Launch");
             ui.selectable_value(
                 &mut self.settings_subtab,
                 SettingsSubTab::UserCommands,
@@ -6880,7 +7160,10 @@ impl PrismarineApp {
             SettingsSubTab::Java => {
                 ui.group(|ui| {
                     changed |= ui
-                        .checkbox(&mut cfg.override_java_location, "Use custom Java for this instance")
+                        .checkbox(
+                            &mut cfg.override_java_location,
+                            "Use custom Java for this instance",
+                        )
                         .changed();
                     if cfg.override_java_location {
                         let java = cfg.java_path.get_or_insert_with(String::new);
@@ -6899,8 +7182,10 @@ impl PrismarineApp {
                                     if let Some(version) = Self::probe_java_runtime(&candidate) {
                                         cfg.java_path = Some(key.clone());
                                         changed = true;
-                                        self.status =
-                                            format!("Instance Java found for {}: {version}", instance.name);
+                                        self.status = format!(
+                                            "Instance Java found for {}: {version}",
+                                            instance.name
+                                        );
                                         break;
                                     }
                                 }
@@ -6936,7 +7221,10 @@ impl PrismarineApp {
             SettingsSubTab::Launch => {
                 ui.group(|ui| {
                     changed |= ui
-                        .checkbox(&mut cfg.override_memory, "Use custom memory for this instance")
+                        .checkbox(
+                            &mut cfg.override_memory,
+                            "Use custom memory for this instance",
+                        )
                         .changed();
                     if cfg.override_memory {
                         let min = cfg.min_mem_alloc.get_or_insert(512);
@@ -7057,26 +7345,35 @@ impl PrismarineApp {
                     .filter_map(|i| i.icon_path.clone().map(|p| (i.name.clone(), p)))
                     .collect();
                 let custom_icons = self.list_custom_icon_files();
-                let mut choose_builtin: Option<(&'static str, &'static str, &'static [u8])> = None;
-                let mut choose_other_icon: Option<String> = None;
-                let mut choose_custom_key: Option<String> = None;
-                let mut choose_default = false;
                 let mut import_custom = false;
+                let mut remove_selected_custom = false;
+                let mut open_icons_folder = false;
+                let mut apply_selection = false;
+                let search = self.set_icon_search.trim().to_ascii_lowercase();
 
                 egui::Window::new("Set Instance Icon")
                     .collapsible(false)
                     .resizable(true)
-                    .default_width(860.0)
-                    .default_height(620.0)
+                    .default_width(900.0)
+                    .default_height(700.0)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("Instance:");
                             ui.monospace(&target_name);
                         });
                         ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Search:");
+                            ui.add_sized(
+                                [ui.available_width(), 28.0],
+                                egui::TextEdit::singleline(&mut self.set_icon_search)
+                                    .hint_text("Search icons..."),
+                            );
+                        });
+                        ui.add_space(6.0);
 
                         ui.columns(2, |cols| {
-                            cols[0].set_min_width(190.0);
+                            cols[0].set_min_width(210.0);
                             cols[0].selectable_value(
                                 &mut self.set_icon_dialog_section,
                                 0,
@@ -7099,71 +7396,119 @@ impl PrismarineApp {
                                 0 => {
                                     cols[1].heading("Built-in Icons");
                                     cols[1].separator();
-                                    if cols[1].button("Use Default").clicked() {
-                                        choose_default = true;
-                                    }
-                                    cols[1].separator();
-                                    egui::Grid::new("set_icon_builtin_grid")
-                                        .num_columns(3)
-                                        .spacing([16.0, 14.0])
+                                    let builtins = [
+                                        (
+                                            "Vanilla",
+                                            "builtin_vanilla",
+                                            "set_icon_builtin_vanilla",
+                                            include_bytes!("../ui/assets/loader_icons/vanilla.png")
+                                                .as_slice(),
+                                        ),
+                                        (
+                                            "Fabric",
+                                            "builtin_fabric",
+                                            "set_icon_builtin_fabric",
+                                            include_bytes!("../ui/assets/loader_icons/fabric.png")
+                                                .as_slice(),
+                                        ),
+                                        (
+                                            "Forge",
+                                            "builtin_forge",
+                                            "set_icon_builtin_forge",
+                                            include_bytes!("../ui/assets/loader_icons/forge.png")
+                                                .as_slice(),
+                                        ),
+                                        (
+                                            "Quilt",
+                                            "builtin_quilt",
+                                            "set_icon_builtin_quilt",
+                                            include_bytes!("../ui/assets/loader_icons/quilt.png")
+                                                .as_slice(),
+                                        ),
+                                        (
+                                            "NeoForge",
+                                            "builtin_neoforge",
+                                            "set_icon_builtin_neoforge",
+                                            include_bytes!("../ui/assets/loader_icons/neoforge.png")
+                                                .as_slice(),
+                                        ),
+                                    ];
+                                    let tile_width = 110.0;
+                                    let columns = ((cols[1].available_width() / tile_width)
+                                        .floor()
+                                        .max(1.0)) as usize;
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("set_icon_builtin_scroll")
                                         .show(&mut cols[1], |ui| {
-                                            let builtins = [
-                                                (
-                                                    "Vanilla",
-                                                    "set_icon_builtin_vanilla",
-                                                    include_bytes!("../ui/assets/loader_icons/vanilla.png")
-                                                        .as_slice(),
-                                                ),
-                                                (
-                                                    "Fabric",
-                                                    "set_icon_builtin_fabric",
-                                                    include_bytes!("../ui/assets/loader_icons/fabric.png")
-                                                        .as_slice(),
-                                                ),
-                                                (
-                                                    "Forge",
-                                                    "set_icon_builtin_forge",
-                                                    include_bytes!("../ui/assets/loader_icons/forge.png")
-                                                        .as_slice(),
-                                                ),
-                                                (
-                                                    "Quilt",
-                                                    "set_icon_builtin_quilt",
-                                                    include_bytes!("../ui/assets/loader_icons/quilt.png")
-                                                        .as_slice(),
-                                                ),
-                                                (
-                                                    "NeoForge",
-                                                    "set_icon_builtin_neoforge",
-                                                    include_bytes!("../ui/assets/loader_icons/neoforge.png")
-                                                        .as_slice(),
-                                                ),
-                                            ];
-                                            for (idx, (title, key, bytes)) in
-                                                builtins.into_iter().enumerate()
-                                            {
-                                                ui.vertical_centered(|ui| {
-                                                    if let Some(tex) = self
-                                                        .ensure_builtin_icon_texture(ui.ctx(), key, bytes)
-                                                        && ui
-                                                            .add(
-                                                                egui::Button::image((
-                                                                    tex.id(),
-                                                                    egui::vec2(40.0, 40.0),
-                                                                )),
-                                                            )
-                                                            .clicked()
+                                            egui::Grid::new("set_icon_builtin_grid")
+                                                .num_columns(columns)
+                                                .spacing([14.0, 12.0])
+                                                .show(ui, |ui| {
+                                                    let mut drawn = 0usize;
+                                                    if search.is_empty() || "default".contains(&search)
                                                     {
-                                                        choose_builtin = Some((title, key, bytes));
+                                                        let selected = self.set_icon_selected_kind == 1;
+                                                        ui.vertical(|ui| {
+                                                            let button = egui::Button::new("Default")
+                                                                .selected(selected);
+                                                            if ui
+                                                                .add_sized([94.0, 58.0], button)
+                                                                .clicked()
+                                                            {
+                                                                self.set_icon_selected_kind = 1;
+                                                                self.set_icon_selected_value.clear();
+                                                            }
+                                                            ui.add_sized(
+                                                                [94.0, 18.0],
+                                                                egui::Label::new("Default").wrap(),
+                                                            );
+                                                        });
+                                                        drawn += 1;
+                                                        if drawn.is_multiple_of(columns) {
+                                                            ui.end_row();
+                                                        }
                                                     }
-                                                    if ui.button(title).clicked() {
-                                                        choose_builtin = Some((title, key, bytes));
+                                                    for (title, icon_key, tex_key, bytes) in builtins {
+                                                        if !search.is_empty()
+                                                            && !title.to_ascii_lowercase().contains(&search)
+                                                        {
+                                                            continue;
+                                                        }
+                                                        let selected = self.set_icon_selected_kind == 2
+                                                            && self.set_icon_selected_value == icon_key;
+                                                        ui.vertical(|ui| {
+                                                            if let Some(tex) = self
+                                                                .ensure_builtin_icon_texture(
+                                                                    ui.ctx(),
+                                                                    tex_key,
+                                                                    bytes,
+                                                                )
+                                                            {
+                                                                let button = egui::Button::image((
+                                                                    tex.id(),
+                                                                    egui::vec2(56.0, 56.0),
+                                                                ))
+                                                                .selected(selected);
+                                                                if ui
+                                                                    .add_sized([94.0, 64.0], button)
+                                                                    .clicked()
+                                                                {
+                                                                    self.set_icon_selected_kind = 2;
+                                                                    self.set_icon_selected_value =
+                                                                        icon_key.to_string();
+                                                                }
+                                                            }
+                                                            ui.add_sized(
+                                                                [94.0, 18.0],
+                                                                egui::Label::new(title).wrap(),
+                                                            );
+                                                        });
+                                                        drawn += 1;
+                                                        if drawn.is_multiple_of(columns) {
+                                                            ui.end_row();
+                                                        }
                                                     }
                                                 });
-                                                if idx % 3 == 2 {
-                                                    ui.end_row();
-                                                }
-                                            }
                                         });
                                 }
                                 1 => {
@@ -7172,38 +7517,57 @@ impl PrismarineApp {
                                     if other_icons.is_empty() {
                                         cols[1].label("No other instance icons found");
                                     } else {
+                                        let tile_width = 118.0;
+                                        let columns = ((cols[1].available_width() / tile_width)
+                                            .floor()
+                                            .max(1.0)) as usize;
                                         egui::ScrollArea::vertical()
                                             .id_salt("set_icon_other_instances_scroll")
                                             .show(&mut cols[1], |ui| {
                                                 egui::Grid::new("set_icon_other_grid")
-                                                    .num_columns(4)
+                                                    .num_columns(columns)
                                                     .spacing([14.0, 12.0])
                                                     .show(ui, |ui| {
-                                                        for (idx, (name, icon_path)) in
-                                                            other_icons.iter().enumerate()
-                                                        {
-                                                            ui.vertical_centered(|ui| {
+                                                        let mut drawn = 0usize;
+                                                        for (name, icon_path) in &other_icons {
+                                                            if !search.is_empty()
+                                                                && !name
+                                                                    .to_ascii_lowercase()
+                                                                    .contains(&search)
+                                                            {
+                                                                continue;
+                                                            }
+                                                            let selected = self.set_icon_selected_kind == 3
+                                                                && self.set_icon_selected_value
+                                                                    == *icon_path;
+                                                            ui.vertical(|ui| {
                                                                 if let Some(tex) = self
                                                                     .ensure_icon_texture(
                                                                         ui.ctx(),
                                                                         icon_path,
                                                                     )
-                                                                    && ui
-                                                                        .add(egui::Button::image((
-                                                                            tex.id(),
-                                                                            egui::vec2(40.0, 40.0),
-                                                                        )))
-                                                                        .clicked()
                                                                 {
-                                                                    choose_other_icon =
-                                                                        Some(icon_path.clone());
+                                                                    let button = egui::Button::image((
+                                                                        tex.id(),
+                                                                        egui::vec2(56.0, 56.0),
+                                                                    ))
+                                                                    .selected(selected);
+                                                                    if ui
+                                                                        .add_sized([96.0, 64.0], button)
+                                                                        .clicked()
+                                                                    {
+                                                                        self.set_icon_selected_kind = 3;
+                                                                        self.set_icon_selected_value =
+                                                                            icon_path.clone();
+                                                                    }
                                                                 }
-                                                                if ui.button(name).clicked() {
-                                                                    choose_other_icon =
-                                                                        Some(icon_path.clone());
-                                                                }
+                                                                ui.add_sized(
+                                                                    [96.0, 32.0],
+                                                                    egui::Label::new(name).wrap(),
+                                                                );
                                                             });
-                                                            if idx % 4 == 3 {
+                                                            drawn += 1;
+                                                            if drawn.is_multiple_of(columns) {
                                                                 ui.end_row();
                                                             }
                                                         }
@@ -7221,43 +7585,61 @@ impl PrismarineApp {
                                     if custom_icons.is_empty() {
                                         cols[1].label("No custom icons in icon store");
                                     } else {
+                                        let tile_width = 118.0;
+                                        let columns = ((cols[1].available_width() / tile_width)
+                                            .floor()
+                                            .max(1.0)) as usize;
                                         egui::ScrollArea::vertical()
                                             .id_salt("set_icon_custom_scroll")
                                             .show(&mut cols[1], |ui| {
                                                 egui::Grid::new("set_icon_custom_grid")
-                                                    .num_columns(4)
+                                                    .num_columns(columns)
                                                     .spacing([14.0, 12.0])
                                                     .show(ui, |ui| {
-                                                        for (idx, icon_path) in
-                                                            custom_icons.iter().enumerate()
-                                                        {
+                                                        let mut drawn = 0usize;
+                                                        for icon_path in &custom_icons {
                                                             let name = Path::new(icon_path)
                                                                 .file_stem()
                                                                 .and_then(|x| x.to_str())
                                                                 .unwrap_or("custom")
                                                                 .to_string();
-                                                            ui.vertical_centered(|ui| {
+                                                            if !search.is_empty()
+                                                                && !name
+                                                                    .to_ascii_lowercase()
+                                                                    .contains(&search)
+                                                            {
+                                                                continue;
+                                                            }
+                                                            let selected = self.set_icon_selected_kind == 4
+                                                                && self.set_icon_selected_value == name;
+                                                            ui.vertical(|ui| {
                                                                 if let Some(tex) = self
                                                                     .ensure_icon_texture(
                                                                         ui.ctx(),
                                                                         icon_path,
                                                                     )
-                                                                    && ui
-                                                                        .add(egui::Button::image((
-                                                                            tex.id(),
-                                                                            egui::vec2(40.0, 40.0),
-                                                                        )))
-                                                                        .clicked()
                                                                 {
-                                                                    choose_custom_key =
-                                                                        Some(name.clone());
+                                                                    let button = egui::Button::image((
+                                                                        tex.id(),
+                                                                        egui::vec2(56.0, 56.0),
+                                                                    ))
+                                                                    .selected(selected);
+                                                                    if ui
+                                                                        .add_sized([96.0, 64.0], button)
+                                                                        .clicked()
+                                                                    {
+                                                                        self.set_icon_selected_kind = 4;
+                                                                        self.set_icon_selected_value =
+                                                                            name.clone();
+                                                                    }
                                                                 }
-                                                                if ui.button(&name).clicked() {
-                                                                    choose_custom_key =
-                                                                        Some(name.clone());
-                                                                }
+                                                                ui.add_sized(
+                                                                    [96.0, 32.0],
+                                                                    egui::Label::new(&name).wrap(),
+                                                                );
                                                             });
-                                                            if idx % 4 == 3 {
+                                                            drawn += 1;
+                                                            if drawn.is_multiple_of(columns) {
                                                                 ui.end_row();
                                                             }
                                                         }
@@ -7270,42 +7652,157 @@ impl PrismarineApp {
 
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button("Close").clicked() {
+                            if ui.button("Add Icon").clicked() {
+                                import_custom = true;
+                            }
+                            if ui.button("Remove Icon").clicked() {
+                                remove_selected_custom = true;
+                            }
+                            if ui.button("Open Folder").clicked() {
+                                open_icons_folder = true;
+                            }
+                            ui.separator();
+                            if ui.button("OK").clicked() {
+                                apply_selection = true;
+                            }
+                            if ui.button("Cancel").clicked() {
                                 self.show_set_icon_dialog = false;
                             }
                         });
                     });
 
-                if choose_default {
-                    self.apply_instance_icon_key(&target_instance_path, None);
-                    self.show_set_icon_dialog = false;
-                } else if let Some((title, key, bytes)) = choose_builtin {
-                    let built_key = format!("builtin_{}", title.to_ascii_lowercase());
-                    if let Some(saved_key) =
-                        self.write_builtin_icon_to_store(&built_key, "png", bytes)
-                    {
-                        self.apply_instance_icon_key(&target_instance_path, Some(&saved_key));
-                        self.show_set_icon_dialog = false;
-                    } else {
-                        self.status = "Failed to write built-in icon".to_string();
-                    }
-                    let _ = key;
-                } else if let Some(other_icon_path) = choose_other_icon {
-                    if let Some(icon_key) = copy_image_to_icon_store(
-                        &self.data_root,
-                        Path::new(&other_icon_path),
-                        &target_name,
-                    ) {
-                        self.apply_instance_icon_key(&target_instance_path, Some(&icon_key));
-                        self.show_set_icon_dialog = false;
-                    } else {
-                        self.status = "Failed to copy icon from another instance".to_string();
-                    }
-                } else if let Some(custom_key) = choose_custom_key {
-                    self.apply_instance_icon_key(&target_instance_path, Some(&custom_key));
-                    self.show_set_icon_dialog = false;
-                } else if import_custom {
+                if import_custom {
                     self.import_custom_instance_icon();
+                }
+                if remove_selected_custom {
+                    if self.set_icon_selected_kind == 4 {
+                        let key = self.set_icon_selected_value.trim().to_string();
+                        if key.is_empty() {
+                            self.status = "No icon selected".to_string();
+                        } else if let Some(path) = custom_icons.iter().find(|p| {
+                            Path::new(p)
+                                .file_stem()
+                                .and_then(|x| x.to_str())
+                                .unwrap_or_default()
+                                == key
+                        }) {
+                            match fs::remove_file(path) {
+                                Ok(_) => {
+                                    self.icon_cache.clear();
+                                    self.set_icon_selected_kind = 0;
+                                    self.set_icon_selected_value.clear();
+                                    self.status = format!("Deleted icon: {key}");
+                                }
+                                Err(err) => {
+                                    self.status = format!("Failed to delete icon: {err}");
+                                }
+                            }
+                        } else {
+                            self.status = "Selected custom icon not found".to_string();
+                        }
+                    } else {
+                        self.status = "Select a custom icon first".to_string();
+                    }
+                }
+                if open_icons_folder {
+                    let icons_dir = self.data_root.join("icons");
+                    let _ = fs::create_dir_all(&icons_dir);
+                    #[cfg(target_os = "linux")]
+                    {
+                        let open_target = icons_dir.display().to_string();
+                        let _ = Command::new("sh")
+                            .arg("-lc")
+                            .arg(format!("xdg-open {}", shell_escape(&open_target)))
+                            .spawn();
+                    }
+                }
+                if apply_selection {
+                    match self.set_icon_selected_kind {
+                        1 => {
+                            self.apply_instance_icon_key(&target_instance_path, None);
+                            self.show_set_icon_dialog = false;
+                        }
+                        2 => {
+                            let icon_key = self.set_icon_selected_value.trim().to_string();
+                            if icon_key.is_empty() {
+                                self.status = "No icon selected".to_string();
+                            } else {
+                                let builtin_bytes = match icon_key.as_str() {
+                                    "builtin_vanilla" => Some(
+                                        include_bytes!("../ui/assets/loader_icons/vanilla.png")
+                                            .as_slice(),
+                                    ),
+                                    "builtin_fabric" => Some(
+                                        include_bytes!("../ui/assets/loader_icons/fabric.png")
+                                            .as_slice(),
+                                    ),
+                                    "builtin_forge" => Some(
+                                        include_bytes!("../ui/assets/loader_icons/forge.png")
+                                            .as_slice(),
+                                    ),
+                                    "builtin_quilt" => Some(
+                                        include_bytes!("../ui/assets/loader_icons/quilt.png")
+                                            .as_slice(),
+                                    ),
+                                    "builtin_neoforge" => Some(
+                                        include_bytes!("../ui/assets/loader_icons/neoforge.png")
+                                            .as_slice(),
+                                    ),
+                                    _ => None,
+                                };
+                                if let Some(bytes) = builtin_bytes {
+                                    if self
+                                        .write_builtin_icon_to_store(&icon_key, "png", bytes)
+                                        .is_some()
+                                    {
+                                        self.apply_instance_icon_key(
+                                            &target_instance_path,
+                                            Some(&icon_key),
+                                        );
+                                        self.show_set_icon_dialog = false;
+                                    } else {
+                                        self.status = "Failed to write built-in icon".to_string();
+                                    }
+                                } else {
+                                    self.status = "Unknown built-in icon".to_string();
+                                }
+                            }
+                        }
+                        4 => {
+                            let icon_key = self.set_icon_selected_value.trim().to_string();
+                            if icon_key.is_empty() {
+                                self.status = "No icon selected".to_string();
+                            } else {
+                                self.apply_instance_icon_key(
+                                    &target_instance_path,
+                                    Some(&icon_key),
+                                );
+                                self.show_set_icon_dialog = false;
+                            }
+                        }
+                        3 => {
+                            let source_path = self.set_icon_selected_value.trim().to_string();
+                            if source_path.is_empty() {
+                                self.status = "No icon selected".to_string();
+                            } else if let Some(icon_key) = copy_image_to_icon_store(
+                                &self.data_root,
+                                Path::new(&source_path),
+                                &target_name,
+                            ) {
+                                self.apply_instance_icon_key(
+                                    &target_instance_path,
+                                    Some(&icon_key),
+                                );
+                                self.show_set_icon_dialog = false;
+                            } else {
+                                self.status =
+                                    "Failed to copy icon from another instance".to_string();
+                            }
+                        }
+                        _ => {
+                            self.status = "Select icon first".to_string();
+                        }
+                    }
                 }
             }
         }
@@ -7697,8 +8194,9 @@ impl PrismarineApp {
                             self.show_manage_accounts_dialog = false;
                         }
                         if ui.button("Help").clicked() {
-                            self.status = "Account management: select an account and an action on the right."
-                                .to_string();
+                            self.status =
+                                "Account management: select an account and an action on the right."
+                                    .to_string();
                         }
                     });
                 });
@@ -7844,11 +8342,18 @@ impl PrismarineApp {
                     .corner_radius(4.0)
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let icon_size = 36.0;
-                        if let Some(icon_path) = toast.icon_path.as_ref() {
-                            if let Some(tex) = self.ensure_icon_texture(ui.ctx(), icon_path) {
-                                ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                        ui.horizontal(|ui| {
+                            let icon_size = 36.0;
+                            if let Some(icon_path) = toast.icon_path.as_ref() {
+                                if let Some(tex) = self.ensure_icon_texture(ui.ctx(), icon_path) {
+                                    ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                                } else if let Some(tex) =
+                                    self.ensure_loader_icon_texture(ui.ctx(), &toast.loader)
+                                {
+                                    ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                                } else {
+                                    ui.add_space(icon_size);
+                                }
                             } else if let Some(tex) =
                                 self.ensure_loader_icon_texture(ui.ctx(), &toast.loader)
                             {
@@ -7856,27 +8361,20 @@ impl PrismarineApp {
                             } else {
                                 ui.add_space(icon_size);
                             }
-                        } else if let Some(tex) =
-                            self.ensure_loader_icon_texture(ui.ctx(), &toast.loader)
-                        {
-                            ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
-                        } else {
-                            ui.add_space(icon_size);
-                        }
-                        ui.vertical(|ui| {
-                            let title_text = egui::RichText::new(toast.title.as_str())
-                                .size(22.0)
-                                .color(title_color);
-                            ui.label(title_text);
-                            ui.label(
-                                egui::RichText::new(toast.subtitle.as_str())
-                                    .size(15.0)
-                                    .color(subtitle_color)
-                                    .weak(),
-                            );
+                            ui.vertical(|ui| {
+                                let title_text = egui::RichText::new(toast.title.as_str())
+                                    .size(22.0)
+                                    .color(title_color);
+                                ui.label(title_text);
+                                ui.label(
+                                    egui::RichText::new(toast.subtitle.as_str())
+                                        .size(15.0)
+                                        .color(subtitle_color)
+                                        .weak(),
+                                );
+                            });
                         });
                     });
-                });
             });
     }
 }
@@ -8385,7 +8883,11 @@ where
     }
 
     if let Some(text) = index_json_text {
-        on_progress(total.max(1), total.max(1), "Parsing modrinth.index.json".to_string());
+        on_progress(
+            total.max(1),
+            total.max(1),
+            "Parsing modrinth.index.json".to_string(),
+        );
         let mrpack_dir = instance_path.join("mrpack");
         fs::create_dir_all(&mrpack_dir)
             .map_err(|e| format!("failed to create mrpack dir {}: {e}", mrpack_dir.display()))?;
@@ -8475,7 +8977,10 @@ fn read_manifest_implementation_version<R: Read + std::io::Seek>(
     let text = read_zip_entry_text(zip, "META-INF/MANIFEST.MF")?;
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.to_ascii_lowercase().starts_with("implementation-version:") {
+        if trimmed
+            .to_ascii_lowercase()
+            .starts_with("implementation-version:")
+        {
             let value = trimmed
                 .split_once(':')
                 .map(|(_, v)| v.trim())
@@ -8500,10 +9005,7 @@ fn parse_first_mods_toml_table(text: &str) -> (Option<String>, Option<String>, O
             continue;
         }
         if line.starts_with("[[") && line.ends_with("]]") {
-            let section = line
-                .trim_start_matches("[[")
-                .trim_end_matches("]]")
-                .trim();
+            let section = line.trim_start_matches("[[").trim_end_matches("]]").trim();
             if section.eq_ignore_ascii_case("mods") {
                 if in_mods {
                     break;
@@ -8896,21 +9398,38 @@ fn save_instance_launch_overrides(
     set_instance_cfg_value(
         instance_path,
         "OverrideCommands",
-        Some(if cfg.override_commands { "true" } else { "false" }),
+        Some(if cfg.override_commands {
+            "true"
+        } else {
+            "false"
+        }),
     )?;
     set_instance_cfg_value(
         instance_path,
         "PreLaunchCommand",
         cfg.pre_launch_command.as_deref(),
     )?;
-    set_instance_cfg_value(instance_path, "PostExitCommand", cfg.post_exit_command.as_deref())?;
-    set_instance_cfg_value(instance_path, "WrapperCommand", cfg.wrapper_command.as_deref())?;
+    set_instance_cfg_value(
+        instance_path,
+        "PostExitCommand",
+        cfg.post_exit_command.as_deref(),
+    )?;
+    set_instance_cfg_value(
+        instance_path,
+        "WrapperCommand",
+        cfg.wrapper_command.as_deref(),
+    )?;
     Ok(())
 }
 
-fn set_instance_cfg_value(instance_path: &Path, key: &str, value: Option<&str>) -> std::io::Result<()> {
+fn set_instance_cfg_value(
+    instance_path: &Path,
+    key: &str,
+    value: Option<&str>,
+) -> std::io::Result<()> {
     let cfg_path = instance_path.join("instance.cfg");
-    let existing = fs::read_to_string(&cfg_path).unwrap_or_else(|_| "# PrismarineLauncher instance\n".to_string());
+    let existing = fs::read_to_string(&cfg_path)
+        .unwrap_or_else(|_| "# PrismarineLauncher instance\n".to_string());
     let mut out = Vec::new();
     let mut replaced = false;
     for line in existing.lines() {
@@ -8926,9 +9445,7 @@ fn set_instance_cfg_value(instance_path: &Path, key: &str, value: Option<&str>) 
         }
         out.push(line.to_string());
     }
-    if !replaced
-        && let Some(v) = value
-    {
+    if !replaced && let Some(v) = value {
         out.push(format!("{key}={v}"));
     }
     let mut text = out.join("\n");
@@ -8957,7 +9474,11 @@ fn sanitize_key_fragment(value: &str) -> String {
 #[allow(dead_code)]
 fn copy_image_to_icon_store(data_root: &Path, source: &Path, base_name: &str) -> Option<String> {
     let ext = source.extension().and_then(|x| x.to_str()).unwrap_or("png");
-    let key = format!("{}_{}", sanitize_key_fragment(base_name), chrono::Local::now().timestamp());
+    let key = format!(
+        "{}_{}",
+        sanitize_key_fragment(base_name),
+        chrono::Local::now().timestamp()
+    );
     let icons_dir = data_root.join("icons");
     let _ = fs::create_dir_all(&icons_dir);
     let dest = icons_dir.join(format!("{key}.{ext}"));
@@ -9002,7 +9523,11 @@ fn decode_svg_rgba(bytes: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
     }
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width as u32, height as u32)?;
     let mut pixmap_mut = pixmap.as_mut();
-    resvg::render(&tree, resvg::tiny_skia::Transform::default(), &mut pixmap_mut);
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::default(),
+        &mut pixmap_mut,
+    );
     Some((pixmap.data().to_vec(), width, height))
 }
 
@@ -9093,6 +9618,92 @@ fn normalize_markdown_html_images(input: &str) -> String {
         out.push_str(&cleaned);
         out.push('\n');
     }
+    out
+}
+
+fn extract_ascii_runs(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    for &b in bytes {
+        if (0x20..=0x7e).contains(&b) {
+            cur.push(b);
+        } else if cur.len() >= 2 {
+            if let Ok(s) = String::from_utf8(cur.clone()) {
+                out.push(s);
+            }
+            cur.clear();
+        } else {
+            cur.clear();
+        }
+    }
+    if cur.len() >= 2
+        && let Ok(s) = String::from_utf8(cur)
+    {
+        out.push(s);
+    }
+    out
+}
+
+fn looks_like_server_address(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() || t.len() > 255 {
+        return false;
+    }
+    t.contains('.') || t.contains(':') || t.eq_ignore_ascii_case("localhost")
+}
+
+fn parse_servers_dat_loose(path: &Path) -> Vec<(String, String)> {
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    let tokens = extract_ascii_runs(&bytes);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut pending_name = String::new();
+    let keys = [
+        "name",
+        "ip",
+        "icon",
+        "acceptTextures",
+        "servers",
+        "hidden",
+        "enabled",
+    ];
+    let mut i = 0usize;
+    while i + 1 < tokens.len() {
+        let key = tokens[i].trim();
+        let val = tokens[i + 1].trim();
+        if key.eq_ignore_ascii_case("name") && !val.is_empty() {
+            pending_name = val.to_string();
+            i += 2;
+            continue;
+        }
+        if key.eq_ignore_ascii_case("ip") && looks_like_server_address(val) {
+            let display = if pending_name.trim().is_empty() {
+                "Minecraft Server".to_string()
+            } else {
+                pending_name.clone()
+            };
+            out.push((display, val.to_string()));
+            pending_name.clear();
+            i += 2;
+            continue;
+        }
+        if looks_like_server_address(key) {
+            let prev = if i > 0 { tokens[i - 1].trim() } else { "" };
+            let display = if prev.is_empty() || keys.iter().any(|k| prev.eq_ignore_ascii_case(k)) {
+                "Minecraft Server".to_string()
+            } else {
+                prev.to_string()
+            };
+            out.push((display, key.to_string()));
+        }
+        i += 1;
+    }
+    out.sort();
+    out.dedup();
     out
 }
 
