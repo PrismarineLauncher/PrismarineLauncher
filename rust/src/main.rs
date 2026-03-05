@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 9;
+const LAUNCHER_VERSION_BUILD: u32 = 10;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -7530,298 +7530,238 @@ impl PrismarineApp {
                             );
                         });
                         ui.add_space(6.0);
+                        let builtins = [
+                            (
+                                "Vanilla",
+                                "builtin_vanilla",
+                                "set_icon_builtin_vanilla",
+                                include_bytes!("../ui/assets/loader_icons/vanilla.png").as_slice(),
+                            ),
+                            (
+                                "Fabric",
+                                "builtin_fabric",
+                                "set_icon_builtin_fabric",
+                                include_bytes!("../ui/assets/loader_icons/fabric.png").as_slice(),
+                            ),
+                            (
+                                "Forge",
+                                "builtin_forge",
+                                "set_icon_builtin_forge",
+                                include_bytes!("../ui/assets/loader_icons/forge.png").as_slice(),
+                            ),
+                            (
+                                "Quilt",
+                                "builtin_quilt",
+                                "set_icon_builtin_quilt",
+                                include_bytes!("../ui/assets/loader_icons/quilt.png").as_slice(),
+                            ),
+                            (
+                                "NeoForge",
+                                "builtin_neoforge",
+                                "set_icon_builtin_neoforge",
+                                include_bytes!("../ui/assets/loader_icons/neoforge.png").as_slice(),
+                            ),
+                        ];
+                        let tile_w = 118.0;
+                        let columns = ((ui.available_width() / tile_w).floor().max(1.0)) as usize;
 
-                        ui.columns(2, |cols| {
-                            cols[0].set_min_width(210.0);
-                            let built_selected = self.set_icon_dialog_section == 0;
-                            let built_resp = cols[0].selectable_label(built_selected, "Built-in Icons");
-                            if built_resp.clicked() {
-                                self.set_icon_dialog_section = 0;
-                            }
-                            cols[0].separator();
-                            let other_selected = self.set_icon_dialog_section == 1;
-                            let other_resp =
-                                cols[0].selectable_label(other_selected, "Icons From Other Instances");
-                            if other_resp.clicked() {
-                                self.set_icon_dialog_section = 1;
-                            }
-                            cols[0].separator();
-                            let custom_selected = self.set_icon_dialog_section == 2;
-                            let custom_resp = cols[0].selectable_label(custom_selected, "Custom Icons");
-                            if custom_resp.clicked() {
-                                self.set_icon_dialog_section = 2;
-                            }
-
-                            match self.set_icon_dialog_section {
-                                0 => {
-                                    cols[1].heading("Built-in Icons");
-                                    cols[1].separator();
-                                    let builtins = [
-                                        (
-                                            "Vanilla",
-                                            "builtin_vanilla",
-                                            "set_icon_builtin_vanilla",
-                                            include_bytes!("../ui/assets/loader_icons/vanilla.png")
-                                                .as_slice(),
-                                        ),
-                                        (
-                                            "Fabric",
-                                            "builtin_fabric",
-                                            "set_icon_builtin_fabric",
-                                            include_bytes!("../ui/assets/loader_icons/fabric.png")
-                                                .as_slice(),
-                                        ),
-                                        (
-                                            "Forge",
-                                            "builtin_forge",
-                                            "set_icon_builtin_forge",
-                                            include_bytes!("../ui/assets/loader_icons/forge.png")
-                                                .as_slice(),
-                                        ),
-                                        (
-                                            "Quilt",
-                                            "builtin_quilt",
-                                            "set_icon_builtin_quilt",
-                                            include_bytes!("../ui/assets/loader_icons/quilt.png")
-                                                .as_slice(),
-                                        ),
-                                        (
-                                            "NeoForge",
-                                            "builtin_neoforge",
-                                            "set_icon_builtin_neoforge",
-                                            include_bytes!("../ui/assets/loader_icons/neoforge.png")
-                                                .as_slice(),
-                                        ),
-                                    ];
-                                    let tile_width = 110.0;
-                                    let columns = ((cols[1].available_width() / tile_width)
-                                        .floor()
-                                        .max(1.0)) as usize;
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("set_icon_builtin_scroll")
-                                        .show(&mut cols[1], |ui| {
-                                            egui::Grid::new("set_icon_builtin_grid")
-                                                .num_columns(columns)
-                                                .spacing([14.0, 12.0])
-                                                .show(ui, |ui| {
-                                                    let mut drawn = 0usize;
-                                                    if search.is_empty() || "default".contains(&search)
+                        egui::ScrollArea::vertical()
+                            .id_salt("set_icon_unified_list_scroll")
+                            .max_height(470.0)
+                            .show(ui, |ui| {
+                                ui.heading("Built-in Icons");
+                                ui.separator();
+                                egui::Grid::new("set_icon_builtin_grid")
+                                    .num_columns(columns)
+                                    .spacing([14.0, 12.0])
+                                    .show(ui, |ui| {
+                                        let mut drawn = 0usize;
+                                        if search.is_empty() || "default".contains(&search) {
+                                            let selected = self.set_icon_selected_kind == 1;
+                                            ui.vertical(|ui| {
+                                                let button =
+                                                    egui::Button::new("Default").selected(selected);
+                                                if ui.add_sized([94.0, 58.0], button).clicked() {
+                                                    self.set_icon_selected_kind = 1;
+                                                    self.set_icon_selected_value.clear();
+                                                }
+                                                ui.add_sized(
+                                                    [94.0, 18.0],
+                                                    egui::Label::new("Default").wrap(),
+                                                );
+                                            });
+                                            drawn += 1;
+                                            if drawn.is_multiple_of(columns) {
+                                                ui.end_row();
+                                            }
+                                        }
+                                        for (title, icon_key, tex_key, bytes) in builtins {
+                                            if !search.is_empty()
+                                                && !title.to_ascii_lowercase().contains(&search)
+                                            {
+                                                continue;
+                                            }
+                                            let selected = self.set_icon_selected_kind == 2
+                                                && self.set_icon_selected_value == icon_key;
+                                            ui.vertical(|ui| {
+                                                if let Some(tex) = self.ensure_builtin_icon_texture(
+                                                    ui.ctx(),
+                                                    tex_key,
+                                                    bytes,
+                                                ) {
+                                                    let button = egui::Button::image((
+                                                        tex.id(),
+                                                        egui::vec2(56.0, 56.0),
+                                                    ))
+                                                    .selected(selected);
+                                                    if ui.add_sized([96.0, 64.0], button).clicked()
                                                     {
-                                                        let selected = self.set_icon_selected_kind == 1;
-                                                        ui.vertical(|ui| {
-                                                            let button = egui::Button::new("Default")
-                                                                .selected(selected);
-                                                            if ui
-                                                                .add_sized([94.0, 58.0], button)
-                                                                .clicked()
-                                                            {
-                                                                self.set_icon_selected_kind = 1;
-                                                                self.set_icon_selected_value.clear();
-                                                            }
-                                                            ui.add_sized(
-                                                                [94.0, 18.0],
-                                                                egui::Label::new("Default").wrap(),
-                                                            );
-                                                        });
-                                                        drawn += 1;
-                                                        if drawn.is_multiple_of(columns) {
-                                                            ui.end_row();
+                                                        self.set_icon_selected_kind = 2;
+                                                        self.set_icon_selected_value =
+                                                            icon_key.to_string();
+                                                    }
+                                                }
+                                                ui.add_sized(
+                                                    [96.0, 18.0],
+                                                    egui::Label::new(truncate_with_ellipsis(
+                                                        title, 16,
+                                                    )),
+                                                );
+                                            });
+                                            drawn += 1;
+                                            if drawn.is_multiple_of(columns) {
+                                                ui.end_row();
+                                            }
+                                        }
+                                    });
+
+                                ui.add_space(8.0);
+                                ui.heading("Icons From Other Instances");
+                                ui.separator();
+                                if other_icons.is_empty() {
+                                    ui.label("No other instance icons found");
+                                } else {
+                                    egui::Grid::new("set_icon_other_grid")
+                                        .num_columns(columns)
+                                        .spacing([14.0, 12.0])
+                                        .show(ui, |ui| {
+                                            let mut drawn = 0usize;
+                                            for (name, icon_path) in &other_icons {
+                                                if !search.is_empty()
+                                                    && !name.to_ascii_lowercase().contains(&search)
+                                                {
+                                                    continue;
+                                                }
+                                                let selected = self.set_icon_selected_kind == 3
+                                                    && self.set_icon_selected_value == *icon_path;
+                                                ui.vertical(|ui| {
+                                                    if let Some(tex) = self
+                                                        .ensure_icon_texture(ui.ctx(), icon_path)
+                                                    {
+                                                        let button = egui::Button::image((
+                                                            tex.id(),
+                                                            egui::vec2(56.0, 56.0),
+                                                        ))
+                                                        .selected(selected);
+                                                        if ui
+                                                            .add_sized([96.0, 64.0], button)
+                                                            .clicked()
+                                                        {
+                                                            self.set_icon_selected_kind = 3;
+                                                            self.set_icon_selected_value =
+                                                                icon_path.clone();
                                                         }
                                                     }
-                                                    for (title, icon_key, tex_key, bytes) in builtins {
-                                                        if !search.is_empty()
-                                                            && !title.to_ascii_lowercase().contains(&search)
-                                                        {
-                                                            continue;
-                                                        }
-                                                        let selected = self.set_icon_selected_kind == 2
-                                                            && self.set_icon_selected_value == icon_key;
-                                                        ui.vertical(|ui| {
-                                                            if let Some(tex) = self
-                                                                .ensure_builtin_icon_texture(
-                                                                    ui.ctx(),
-                                                                    tex_key,
-                                                                    bytes,
-                                                                )
-                                                            {
-                                                                let button = egui::Button::image((
-                                                                    tex.id(),
-                                                                    egui::vec2(56.0, 56.0),
-                                                                ))
-                                                                .selected(selected);
-                                                                if ui
-                                                                    .add_sized([94.0, 64.0], button)
-                                                                    .clicked()
-                                                                {
-                                                                    self.set_icon_selected_kind = 2;
-                                                                    self.set_icon_selected_value =
-                                                                        icon_key.to_string();
-                                                                }
-                                                            }
-                                                            ui.add_sized(
-                                                                [94.0, 18.0],
-                                                                egui::Label::new(title).wrap(),
-                                                            );
-                                                        });
-                                                        drawn += 1;
-                                                        if drawn.is_multiple_of(columns) {
-                                                            ui.end_row();
-                                                        }
+                                                    let short_name =
+                                                        truncate_with_ellipsis(name, 16);
+                                                    let name_resp = ui.add_sized(
+                                                        [96.0, 32.0],
+                                                        egui::Label::new(short_name),
+                                                    );
+                                                    if name_resp.hovered() {
+                                                        name_resp.on_hover_text(name);
                                                     }
                                                 });
+                                                drawn += 1;
+                                                if drawn.is_multiple_of(columns) {
+                                                    ui.end_row();
+                                                }
+                                            }
                                         });
                                 }
-                                1 => {
-                                    cols[1].heading("Icons From Other Instances");
-                                    cols[1].separator();
-                                    if other_icons.is_empty() {
-                                        cols[1].label("No other instance icons found");
-                                    } else {
-                                        let tile_width = 118.0;
-                                        let columns = ((cols[1].available_width() / tile_width)
-                                            .floor()
-                                            .max(1.0)) as usize;
-                                        egui::ScrollArea::vertical()
-                                            .id_salt("set_icon_other_instances_scroll")
-                                            .show(&mut cols[1], |ui| {
-                                                egui::Grid::new("set_icon_other_grid")
-                                                    .num_columns(columns)
-                                                    .spacing([14.0, 12.0])
-                                                    .show(ui, |ui| {
-                                                        let mut drawn = 0usize;
-                                                        for (name, icon_path) in &other_icons {
-                                                            if !search.is_empty()
-                                                                && !name
-                                                                    .to_ascii_lowercase()
-                                                                    .contains(&search)
-                                                            {
-                                                                continue;
-                                                            }
-                                                            let selected = self.set_icon_selected_kind == 3
-                                                                && self.set_icon_selected_value
-                                                                    == *icon_path;
-                                                            ui.vertical(|ui| {
-                                                                if let Some(tex) = self
-                                                                    .ensure_icon_texture(
-                                                                        ui.ctx(),
-                                                                        icon_path,
-                                                                    )
-                                                                {
-                                                                    let button = egui::Button::image((
-                                                                        tex.id(),
-                                                                        egui::vec2(56.0, 56.0),
-                                                                    ))
-                                                                    .selected(selected);
-                                                                    if ui
-                                                                        .add_sized([96.0, 64.0], button)
-                                                                        .clicked()
-                                                                    {
-                                                                        self.set_icon_selected_kind = 3;
-                                                                        self.set_icon_selected_value =
-                                                                            icon_path.clone();
-                                                                    }
-                                                                }
-                                                                let short_name =
-                                                                    truncate_with_ellipsis(name, 16);
-                                                                let name_resp = ui.add_sized(
-                                                                    [96.0, 32.0],
-                                                                    egui::Label::new(short_name),
-                                                                );
-                                                                if name_resp.hovered() {
-                                                                    name_resp.on_hover_text(name);
-                                                                }
-                                                            });
-                                                            drawn += 1;
-                                                            if drawn.is_multiple_of(columns) {
-                                                                ui.end_row();
-                                                            }
-                                                        }
-                                                    });
-                                            });
+
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.heading("Custom Icons");
+                                    ui.add_space(8.0);
+                                    if ui
+                                        .add_sized(
+                                            [170.0, 24.0],
+                                            egui::Button::new("Import Custom Icon..."),
+                                        )
+                                        .clicked()
+                                    {
+                                        import_custom = true;
                                     }
-                                }
-                                _ => {
-                            cols[1].heading("Custom Icons");
-                            cols[1].separator();
-                            if cols[1]
-                                .add_sized([170.0, 24.0], egui::Button::new("Import Custom Icon..."))
-                                .clicked()
-                            {
-                                import_custom = true;
-                            }
-                                    cols[1].separator();
-                                    if custom_icons.is_empty() {
-                                        cols[1].label("No custom icons in icon store");
-                                    } else {
-                                        let tile_width = 118.0;
-                                        let columns = ((cols[1].available_width() / tile_width)
-                                            .floor()
-                                            .max(1.0)) as usize;
-                                        egui::ScrollArea::vertical()
-                                            .id_salt("set_icon_custom_scroll")
-                                            .show(&mut cols[1], |ui| {
-                                                egui::Grid::new("set_icon_custom_grid")
-                                                    .num_columns(columns)
-                                                    .spacing([14.0, 12.0])
-                                                    .show(ui, |ui| {
-                                                        let mut drawn = 0usize;
-                                                        for icon_path in &custom_icons {
-                                                            let name = Path::new(icon_path)
-                                                                .file_stem()
-                                                                .and_then(|x| x.to_str())
-                                                                .unwrap_or("custom")
-                                                                .to_string();
-                                                            if !search.is_empty()
-                                                                && !name
-                                                                    .to_ascii_lowercase()
-                                                                    .contains(&search)
-                                                            {
-                                                                continue;
-                                                            }
-                                                            let selected = self.set_icon_selected_kind == 4
-                                                                && self.set_icon_selected_value == name;
-                                                            ui.vertical(|ui| {
-                                                                if let Some(tex) = self
-                                                                    .ensure_icon_texture(
-                                                                        ui.ctx(),
-                                                                        icon_path,
-                                                                    )
-                                                                {
-                                                                    let button = egui::Button::image((
-                                                                        tex.id(),
-                                                                        egui::vec2(56.0, 56.0),
-                                                                    ))
-                                                                    .selected(selected);
-                                                                    if ui
-                                                                        .add_sized([96.0, 64.0], button)
-                                                                        .clicked()
-                                                                    {
-                                                                        self.set_icon_selected_kind = 4;
-                                                                        self.set_icon_selected_value =
-                                                                            name.clone();
-                                                                    }
-                                                                }
-                                                                let short_name =
-                                                                    truncate_with_ellipsis(&name, 16);
-                                                                let name_resp = ui.add_sized(
-                                                                    [96.0, 32.0],
-                                                                    egui::Label::new(short_name),
-                                                                );
-                                                                if name_resp.hovered() {
-                                                                    name_resp.on_hover_text(name.clone());
-                                                                }
-                                                            });
-                                                            drawn += 1;
-                                                            if drawn.is_multiple_of(columns) {
-                                                                ui.end_row();
-                                                            }
+                                });
+                                ui.separator();
+                                if custom_icons.is_empty() {
+                                    ui.label("No custom icons in icon store");
+                                } else {
+                                    egui::Grid::new("set_icon_custom_grid")
+                                        .num_columns(columns)
+                                        .spacing([14.0, 12.0])
+                                        .show(ui, |ui| {
+                                            let mut drawn = 0usize;
+                                            for icon_path in &custom_icons {
+                                                let name = Path::new(icon_path)
+                                                    .file_stem()
+                                                    .and_then(|x| x.to_str())
+                                                    .unwrap_or("custom")
+                                                    .to_string();
+                                                if !search.is_empty()
+                                                    && !name.to_ascii_lowercase().contains(&search)
+                                                {
+                                                    continue;
+                                                }
+                                                let selected = self.set_icon_selected_kind == 4
+                                                    && self.set_icon_selected_value == name;
+                                                ui.vertical(|ui| {
+                                                    if let Some(tex) = self
+                                                        .ensure_icon_texture(ui.ctx(), icon_path)
+                                                    {
+                                                        let button = egui::Button::image((
+                                                            tex.id(),
+                                                            egui::vec2(56.0, 56.0),
+                                                        ))
+                                                        .selected(selected);
+                                                        if ui
+                                                            .add_sized([96.0, 64.0], button)
+                                                            .clicked()
+                                                        {
+                                                            self.set_icon_selected_kind = 4;
+                                                            self.set_icon_selected_value =
+                                                                name.clone();
                                                         }
-                                                    });
-                                            });
-                                    }
+                                                    }
+                                                    let short_name =
+                                                        truncate_with_ellipsis(&name, 16);
+                                                    let name_resp = ui.add_sized(
+                                                        [96.0, 32.0],
+                                                        egui::Label::new(short_name),
+                                                    );
+                                                    if name_resp.hovered() {
+                                                        name_resp.on_hover_text(name.clone());
+                                                    }
+                                                });
+                                                drawn += 1;
+                                                if drawn.is_multiple_of(columns) {
+                                                    ui.end_row();
+                                                }
+                                            }
+                                        });
                                 }
-                            }
-                        });
+                            });
 
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -7844,7 +7784,10 @@ impl PrismarineApp {
                                 open_icons_folder = true;
                             }
                             ui.separator();
-                            if ui.add_sized([52.0, 24.0], egui::Button::new("OK")).clicked() {
+                            if ui
+                                .add_sized([52.0, 24.0], egui::Button::new("OK"))
+                                .clicked()
+                            {
                                 apply_selection = true;
                             }
                             if ui
