@@ -1111,6 +1111,299 @@ where
     Ok(())
 }
 
+fn collect_game_args_from_version_json(json: &serde_json::Value) -> Vec<String> {
+    if let Some(game_args) = json
+        .get("arguments")
+        .and_then(|x| x.get("game"))
+        .and_then(|x| x.as_array())
+    {
+        let mut out = Vec::new();
+        for item in game_args {
+            if let Some(s) = item.as_str() {
+                out.push(s.to_string());
+                continue;
+            }
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
+            if !rules_allow_library(item) {
+                continue;
+            }
+            let Some(value) = obj.get("value") else {
+                continue;
+            };
+            if let Some(s) = value.as_str() {
+                out.push(s.to_string());
+            } else if let Some(arr) = value.as_array() {
+                for v in arr {
+                    if let Some(s) = v.as_str() {
+                        out.push(s.to_string());
+                    }
+                }
+            }
+        }
+        return out;
+    }
+    if let Some(legacy) = json.get("minecraftArguments").and_then(|x| x.as_str()) {
+        return legacy
+            .split_whitespace()
+            .map(ToString::to_string)
+            .collect();
+    }
+    Vec::new()
+}
+
+fn replace_launch_placeholders(arg: &str, pairs: &[(&str, String)]) -> String {
+    let mut out = arg.to_string();
+    for (k, v) in pairs {
+        out = out.replace(k, v);
+    }
+    out
+}
+
+pub fn prepare_local_forge_runtime(
+    data_root: &Path,
+    instance_path: &Path,
+    game_version: &str,
+    profile: &mut LaunchProfile,
+) -> Result<bool, String> {
+    let game_dir = if instance_path.join("minecraft").is_dir() {
+        instance_path.join("minecraft")
+    } else {
+        instance_path.to_path_buf()
+    };
+    let versions_dir = game_dir.join("versions");
+    if !versions_dir.is_dir() {
+        return Ok(false);
+    }
+
+    let mut best_id = None::<String>;
+    let mut best_score = i32::MIN;
+    for entry in fs::read_dir(&versions_dir)
+        .map_err(|e| format!("failed to scan versions dir {}: {e}", versions_dir.display()))?
+        .flatten()
+    {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(dir_name) = dir.file_name().and_then(|x| x.to_str()) else {
+            continue;
+        };
+        let json_path = dir.join(format!("{dir_name}.json"));
+        if !json_path.is_file() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&json_path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let id = json
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or(dir_name)
+            .to_string();
+        let id_lower = id.to_ascii_lowercase();
+        let mut score = 0i32;
+        if id_lower.contains("forge") {
+            score += 60;
+        }
+        if id.contains(game_version) {
+            score += 30;
+        }
+        if json
+            .get("inheritsFrom")
+            .and_then(|x| x.as_str())
+            .map(|x| x == game_version)
+            .unwrap_or(false)
+        {
+            score += 20;
+        }
+        if json
+            .get("mainClass")
+            .and_then(|x| x.as_str())
+            .map(|x| x.to_ascii_lowercase().contains("launchwrapper"))
+            .unwrap_or(false)
+        {
+            score += 10;
+        }
+        if score > best_score {
+            best_score = score;
+            best_id = Some(id);
+        }
+    }
+
+    let Some(version_id) = best_id else {
+        return Ok(false);
+    };
+    if !version_id.to_ascii_lowercase().contains("forge") {
+        return Ok(false);
+    }
+
+    let version_json_path = versions_dir
+        .join(&version_id)
+        .join(format!("{version_id}.json"));
+    let version_text = fs::read_to_string(&version_json_path)
+        .map_err(|e| format!("failed to read local forge json {}: {e}", version_json_path.display()))?;
+    let mut version_json = serde_json::from_str::<serde_json::Value>(&version_text)
+        .map_err(|e| format!("failed to parse local forge json {}: {e}", version_json_path.display()))?;
+
+    if let Some(parent_id) = version_json
+        .get("inheritsFrom")
+        .and_then(|x| x.as_str())
+        .map(ToString::to_string)
+    {
+        let parent_path = versions_dir.join(&parent_id).join(format!("{parent_id}.json"));
+        if let Ok(parent_text) = fs::read_to_string(&parent_path)
+            && let Ok(parent_json) = serde_json::from_str::<serde_json::Value>(&parent_text)
+        {
+            version_json = merge_parent_child_version(&parent_json, &version_json);
+        }
+    }
+
+    let mut classpath = Vec::new();
+    if let Some(libraries) = version_json.get("libraries").and_then(|x| x.as_array()) {
+        for lib in libraries {
+            if !rules_allow_library(lib) {
+                continue;
+            }
+            let rel_path = lib
+                .get("downloads")
+                .and_then(|d| d.get("artifact"))
+                .and_then(|a| a.get("path"))
+                .and_then(|x| x.as_str())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    lib.get("name")
+                        .and_then(|x| x.as_str())
+                        .and_then(maven_artifact_path)
+                });
+            let Some(rel_path) = rel_path else {
+                continue;
+            };
+            for candidate in [
+                game_dir.join("libraries").join(&rel_path),
+                instance_path.join("libraries").join(&rel_path),
+                data_root.join("libraries").join(&rel_path),
+            ] {
+                if candidate.is_file() {
+                    let c = candidate.display().to_string();
+                    if !classpath.iter().any(|x| x == &c) {
+                        classpath.push(c);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    for jar in [
+        versions_dir.join(&version_id).join(format!("{version_id}.jar")),
+        version_json
+            .get("inheritsFrom")
+            .and_then(|x| x.as_str())
+            .map(|parent| versions_dir.join(parent).join(format!("{parent}.jar")))
+            .unwrap_or_else(PathBuf::new),
+    ] {
+        if jar.is_file() {
+            let v = jar.display().to_string();
+            if !classpath.iter().any(|x| x == &v) {
+                classpath.push(v);
+            }
+        }
+    }
+
+    if classpath.is_empty() {
+        return Ok(false);
+    }
+    profile.classpath = classpath;
+
+    if let Some(main_class) = version_json.get("mainClass").and_then(|x| x.as_str())
+        && !main_class.trim().is_empty()
+    {
+        profile.main_class = main_class.to_string();
+    }
+
+    let assets_dir = if game_dir.join("assets").is_dir() {
+        game_dir.join("assets")
+    } else {
+        data_root.join("assets")
+    };
+    let asset_id = version_json
+        .get("assetIndex")
+        .and_then(|x| x.get("id"))
+        .and_then(|x| x.as_str())
+        .or_else(|| version_json.get("assets").and_then(|x| x.as_str()))
+        .unwrap_or(game_version)
+        .to_string();
+    let natives_dir = instance_path.join("natives");
+
+    let replacements = vec![
+        ("${version_name}", version_id.clone()),
+        ("${game_directory}", game_dir.display().to_string()),
+        ("${assets_root}", assets_dir.display().to_string()),
+        ("${assets_index_name}", asset_id.clone()),
+        (
+            "${game_assets}",
+            assets_dir.join("virtual").join("legacy").display().to_string(),
+        ),
+        ("${auth_player_name}", "Player".to_string()),
+        ("${auth_uuid}", "00000000000000000000000000000000".to_string()),
+        ("${auth_access_token}", "0".to_string()),
+        (
+            "${auth_session}",
+            "token:0:00000000000000000000000000000000".to_string(),
+        ),
+        ("${user_type}", "offline".to_string()),
+        ("${user_properties}", "{}".to_string()),
+        ("${version_type}", "release".to_string()),
+        (
+            "${classpath_separator}",
+            if cfg!(windows) { ";" } else { ":" }.to_string(),
+        ),
+        ("${library_directory}", data_root.join("libraries").display().to_string()),
+        ("${natives_directory}", natives_dir.display().to_string()),
+    ];
+
+    let mut game_args = collect_game_args_from_version_json(&version_json);
+    for a in &mut game_args {
+        *a = replace_launch_placeholders(a, &replacements);
+    }
+    if !game_args.is_empty() {
+        profile.game_args = game_args;
+    }
+
+    upsert_arg_pair(&mut profile.game_args, "--version", &version_id);
+    upsert_arg_pair(
+        &mut profile.game_args,
+        "--gameDir",
+        &game_dir.display().to_string(),
+    );
+    upsert_arg_pair(
+        &mut profile.game_args,
+        "--assetsDir",
+        &assets_dir.display().to_string(),
+    );
+    upsert_arg_pair(&mut profile.game_args, "--assetIndex", &asset_id);
+    upsert_arg_pair(
+        &mut profile.game_args,
+        "--versionType",
+        version_json
+            .get("type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("release"),
+    );
+    upsert_jvm_property(
+        &mut profile.jvm_args,
+        "java.library.path",
+        &natives_dir.display().to_string(),
+    );
+
+    Ok(true)
+}
+
 #[derive(Deserialize)]
 struct MinecraftProfileResponse {
     id: String,

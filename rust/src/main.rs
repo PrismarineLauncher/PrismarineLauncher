@@ -11,10 +11,10 @@ use rust_core::{
     ensure_fabric_runtime_with_progress, ensure_minecraft_runtime_with_progress, format_s3_time,
     list_logs, list_mod_files, load_launch_profile, load_prism_instance_config,
     modrinth_get_project_details, modrinth_resolve_primary_file,
-    modrinth_search_projects_by_type_paged, parse_s3_time, read_log_preview,
-    refresh_microsoft_account, rename_instance, save_launch_profile, scan_instances,
-    start_microsoft_device_code, sync_modrinth_managed_mods, update_installed_modrinth_mods,
-    validate_minecraft_account,
+    modrinth_search_projects_by_type_paged, parse_s3_time, prepare_local_forge_runtime,
+    read_log_preview, refresh_microsoft_account, rename_instance, save_launch_profile,
+    scan_instances, start_microsoft_device_code, sync_modrinth_managed_mods,
+    update_installed_modrinth_mods, validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 11;
+const LAUNCHER_VERSION_BUILD: u32 = 12;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -1423,6 +1423,7 @@ impl PrismarineApp {
         remove_arg_pair(game_args, "--uuid");
         remove_arg_pair(game_args, "--accessToken");
         remove_arg_pair(game_args, "--userType");
+        remove_arg_pair(game_args, "--userProperties");
         remove_arg_pair(game_args, "--versionType");
 
         let active_idx = self.accounts.iter().position(|x| x.active);
@@ -1508,6 +1509,8 @@ impl PrismarineApp {
         game_args.push(access_token);
         game_args.push("--userType".to_string());
         game_args.push(user_type);
+        game_args.push("--userProperties".to_string());
+        game_args.push("{}".to_string());
         game_args.push("--versionType".to_string());
         game_args.push("release".to_string());
     }
@@ -4813,6 +4816,34 @@ impl PrismarineApp {
                             });
                         },
                     )
+                } else if instance_loader == "forge" {
+                    match prepare_local_forge_runtime(
+                        &data_root,
+                        &instance_path_copy,
+                        &instance_version,
+                        &mut profile,
+                    ) {
+                        Ok(true) => {
+                            let _ = tx.send(LaunchWorkerEvent::Status {
+                                instance_path: instance_key.clone(),
+                                message: "Prepared local Forge runtime profile".to_string(),
+                            });
+                            Ok(())
+                        }
+                        Ok(false) => ensure_minecraft_runtime_with_progress(
+                            &data_root,
+                            &instance_path_copy,
+                            &instance_version,
+                            &mut profile,
+                            |progress| {
+                                let _ = tx.send(LaunchWorkerEvent::Progress {
+                                    instance_path: instance_key.clone(),
+                                    progress,
+                                });
+                            },
+                        ),
+                        Err(err) => Err(err),
+                    }
                 } else {
                     ensure_minecraft_runtime_with_progress(
                         &data_root,
