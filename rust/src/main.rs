@@ -370,11 +370,13 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 31;
+const LAUNCHER_VERSION_BUILD: u32 = 32;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
 }
+
+const LOG_PREVIEW_MAX_CHARS: usize = 2_000_000;
 
 enum DeviceLoginEvent {
     Success(LicensedMicrosoftAccount),
@@ -5461,7 +5463,7 @@ impl PrismarineApp {
             return;
         }
         let path = self.logs_cache[idx].1.clone();
-        match read_log_preview(Path::new(&path), 20_000) {
+        match read_log_preview(Path::new(&path), LOG_PREVIEW_MAX_CHARS) {
             Ok(text) => {
                 self.log_preview = text;
             }
@@ -7433,7 +7435,7 @@ impl PrismarineApp {
         let total_w = ui.available_width().max(300.0);
         let split_gap = ui.spacing().item_spacing.x.max(4.0);
         let content_w = (total_w - split_gap).max(2.0);
-        let left_w = (content_w * 0.30).max(180.0);
+        let left_w = (content_w * 0.20).max(160.0);
         let right_w = (content_w - left_w).max(180.0);
         let panel_h = ui.available_height().max(180.0);
         ui.horizontal(|ui| {
