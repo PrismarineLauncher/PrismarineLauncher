@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 30;
+const LAUNCHER_VERSION_BUILD: u32 = 31;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -7430,77 +7430,98 @@ impl PrismarineApp {
         });
         ui.separator();
 
-        ui.columns(2, |cols| {
-            cols[0].label("Log files");
-            cols[0].separator();
-            egui::ScrollArea::vertical()
-                .id_salt("logs_files_scroll")
-                .show(&mut cols[0], |ui| {
-                    let mut clicked_index = None;
-                    for idx in 0..self.logs_cache.len() {
-                        let name = self.logs_cache[idx].0.clone();
-                        let selected = self.selected_log == Some(idx);
-                        let (icon_url, display_name) = log_icon_and_name(&name);
-                        let mut row_clicked = false;
-                        ui.horizontal(|ui| {
-                            if let Some(tex) =
-                                self.ensure_icon_texture_from_source(ui.ctx(), icon_url)
-                            {
-                                ui.image((tex.id(), egui::vec2(18.0, 18.0)));
-                            } else {
-                                ui.add_space(18.0);
+        let total_w = ui.available_width().max(300.0);
+        let split_gap = ui.spacing().item_spacing.x.max(4.0);
+        let content_w = (total_w - split_gap).max(2.0);
+        let left_w = (content_w * 0.30).max(180.0);
+        let right_w = (content_w - left_w).max(180.0);
+        let panel_h = ui.available_height().max(180.0);
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(left_w, panel_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.label("Log files");
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("logs_files_scroll")
+                        .max_height(panel_h - 24.0)
+                        .show(ui, |ui| {
+                            let mut clicked_index = None;
+                            for idx in 0..self.logs_cache.len() {
+                                let name = self.logs_cache[idx].0.clone();
+                                let selected = self.selected_log == Some(idx);
+                                let (icon_url, display_name) = log_icon_and_name(&name);
+                                let mut row_clicked = false;
+                                ui.horizontal(|ui| {
+                                    if let Some(tex) =
+                                        self.ensure_icon_texture_from_source(ui.ctx(), icon_url)
+                                    {
+                                        ui.image((tex.id(), egui::vec2(18.0, 18.0)));
+                                    } else {
+                                        ui.add_space(18.0);
+                                    }
+                                    if ui.selectable_label(selected, display_name).clicked() {
+                                        row_clicked = true;
+                                    }
+                                });
+                                if row_clicked {
+                                    clicked_index = Some(idx);
+                                }
                             }
-                            if ui.selectable_label(selected, display_name).clicked() {
-                                row_clicked = true;
+                            if let Some(idx) = clicked_index {
+                                self.selected_log = Some(idx);
+                                self.open_selected_log_preview();
                             }
                         });
-                        if row_clicked {
-                            clicked_index = Some(idx);
-                        }
-                    }
-                    if let Some(idx) = clicked_index {
-                        self.selected_log = Some(idx);
-                        self.open_selected_log_preview();
-                    }
-                });
-
-            cols[1].label("Preview");
-            cols[1].separator();
-            egui::ScrollArea::both()
-                .id_salt("logs_preview_scroll")
-                .show(&mut cols[1], |ui| {
-                    if self.log_preview.is_empty() {
-                        ui.label("No log selected");
-                    } else {
-                        for (idx, raw_line) in self.log_preview.lines().enumerate() {
-                            let line = sanitize_log_line(raw_line);
-                            ui.horizontal(|ui| {
-                                ui.add_sized(
-                                    [44.0, 0.0],
-                                    egui::Label::new(
-                                        egui::RichText::new(format!("{:>4}", idx + 1))
-                                            .monospace()
-                                            .size(13.0)
-                                            .color(egui::Color32::from_rgb(115, 121, 133)),
-                                    ),
-                                );
-                                if line.is_empty() {
-                                    ui.monospace(" ");
-                                } else {
-                                    let style = classify_log_line_style(&line, ui.visuals());
-                                    let mut text = egui::RichText::new(line.as_str())
-                                        .monospace()
-                                        .size(14.0)
-                                        .color(style.0);
-                                    if style.1 {
-                                        text = text.strong();
-                                    }
-                                    ui.label(text);
+                },
+            );
+            ui.add_space(split_gap);
+            ui.allocate_ui_with_layout(
+                egui::vec2(right_w, panel_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.label("Preview");
+                    ui.separator();
+                    egui::ScrollArea::both()
+                        .id_salt("logs_preview_scroll")
+                        .max_height(panel_h - 24.0)
+                        .show(ui, |ui| {
+                            if self.log_preview.is_empty() {
+                                ui.label("No log selected");
+                            } else {
+                                for (idx, raw_line) in self.log_preview.lines().enumerate() {
+                                    let line = sanitize_log_line(raw_line);
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [44.0, 0.0],
+                                            egui::Label::new(
+                                                egui::RichText::new(format!("{:>4}", idx + 1))
+                                                    .monospace()
+                                                    .size(13.0)
+                                                    .color(egui::Color32::from_rgb(115, 121, 133)),
+                                            ),
+                                        );
+                                        if line.is_empty() {
+                                            ui.monospace(" ");
+                                        } else {
+                                            let style =
+                                                classify_log_line_style(&line, ui.visuals());
+                                            let mut text = egui::RichText::new(line.as_str())
+                                                .monospace()
+                                                .size(14.0)
+                                                .color(style.0);
+                                            if style.1 {
+                                                text = text.strong();
+                                            }
+                                            ui.label(text);
+                                        }
+                                    });
                                 }
-                            });
-                        }
-                    }
-                });
+                            }
+                        });
+                },
+            );
         });
     }
 
