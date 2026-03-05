@@ -2,6 +2,7 @@ use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::collections::HashSet;
 use std::ffi::{CStr, c_char};
 use std::fs;
 use std::io::{Read, Write};
@@ -44,6 +45,7 @@ pub struct LaunchProfile {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrismInstanceConfig {
     pub icon_key: Option<String>,
+    pub group: Option<String>,
     pub intended_version: Option<String>,
     pub override_java_location: bool,
     pub java_path: Option<String>,
@@ -62,6 +64,7 @@ pub struct PrismInstanceConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountValidation {
     pub username: String,
+    pub uuid: String,
     pub has_minecraft_license: bool,
 }
 
@@ -78,7 +81,9 @@ pub struct MicrosoftDeviceCode {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LicensedMicrosoftAccount {
     pub username: String,
+    pub uuid: String,
     pub access_token: String,
+    pub refresh_token: Option<String>,
     pub has_minecraft_license: bool,
 }
 
@@ -411,6 +416,7 @@ pub fn load_prism_instance_config(instance_path: &Path) -> std::io::Result<Prism
 
         match key {
             "iconKey" => cfg.icon_key = Some(value.to_string()),
+            "Group" | "group" => cfg.group = Some(value.to_string()),
             "IntendedVersion" | "MinecraftVersion" | "lastLaunchVersionId" => {
                 cfg.intended_version = Some(value.to_string())
             }
@@ -579,6 +585,60 @@ fn ensure_url_to_path(
         }
     }
     Ok(())
+}
+
+fn maven_artifact_path(name: &str) -> Option<String> {
+    let (coords, ext) = if let Some((left, right)) = name.split_once('@') {
+        (left, right)
+    } else {
+        (name, "jar")
+    };
+    let mut parts = coords.split(':');
+    let group = parts.next()?;
+    let artifact = parts.next()?;
+    let version = parts.next()?;
+    let classifier = parts.next();
+    if group.is_empty() || artifact.is_empty() || version.is_empty() {
+        return None;
+    }
+    let group_path = group.replace('.', "/");
+    let mut file = format!("{artifact}-{version}");
+    if let Some(classifier) = classifier
+        && !classifier.is_empty()
+    {
+        file.push('-');
+        file.push_str(classifier);
+    }
+    file.push('.');
+    file.push_str(ext);
+    Some(format!(
+        "{group_path}/{artifact}/{version}/{file}"
+    ))
+}
+
+fn resolve_fabric_loader_version(client: &Client, game_version: &str) -> Result<String, String> {
+    let url = format!("https://meta.fabricmc.net/v2/versions/loader/{game_version}");
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("fabric loader versions request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "fabric loader versions request returned {}",
+            response.status()
+        ));
+    }
+    let json = response
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("failed to parse fabric loader versions response: {e}"))?;
+    let version = json
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|x| x.get("loader"))
+        .and_then(|x| x.get("version"))
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "fabric loader versions response is empty".to_string())?;
+    Ok(version.to_string())
 }
 
 fn upsert_arg_pair(args: &mut Vec<String>, key: &str, value: &str) {
@@ -939,8 +999,121 @@ pub fn ensure_minecraft_runtime(
     ensure_minecraft_runtime_with_progress(data_root, instance_path, version_id, profile, |_| {})
 }
 
+pub fn ensure_fabric_runtime_with_progress<F>(
+    data_root: &Path,
+    instance_path: &Path,
+    game_version: &str,
+    loader_version_hint: Option<&str>,
+    profile: &mut LaunchProfile,
+    mut on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(RuntimeDownloadProgress),
+{
+    ensure_minecraft_runtime_with_progress(
+        data_root,
+        instance_path,
+        game_version,
+        profile,
+        |p| on_progress(p),
+    )?;
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let loader_version = match loader_version_hint.map(str::trim) {
+        Some(v) if !v.is_empty() && v != "0.0.0" => v.to_string(),
+        _ => resolve_fabric_loader_version(&client, game_version)?,
+    };
+
+    on_progress(RuntimeDownloadProgress {
+        stage: "fabric".to_string(),
+        done: 0,
+        total: 1,
+        message: format!("Preparing Fabric loader {loader_version}"),
+    });
+
+    let profile_url = format!(
+        "https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",
+        game_version, loader_version
+    );
+    let response = client
+        .get(&profile_url)
+        .send()
+        .map_err(|e| format!("fabric profile request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("fabric profile request returned {}", response.status()));
+    }
+    let json = response
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("failed to parse fabric profile json: {e}"))?;
+
+    let mut added = 0usize;
+    let mut total = 0usize;
+    if let Some(libs) = json.get("libraries").and_then(|x| x.as_array()) {
+        total = libs.len().max(1);
+        for (idx, lib) in libs.iter().enumerate() {
+            let name = lib.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let base_url = lib
+                .get("url")
+                .and_then(|x| x.as_str())
+                .unwrap_or("https://maven.fabricmc.net/");
+            let sha1 = lib.get("sha1").and_then(|x| x.as_str());
+            let Some(rel_path) = maven_artifact_path(name) else {
+                continue;
+            };
+            let target = data_root.join("libraries").join(&rel_path);
+            let mut full_url = base_url.trim_end_matches('/').to_string();
+            full_url.push('/');
+            full_url.push_str(&rel_path);
+            ensure_url_to_path(&client, &full_url, &target, sha1)?;
+            let target_str = target.display().to_string();
+            if !profile.classpath.iter().any(|x| x == &target_str) {
+                profile.classpath.push(target_str);
+                added += 1;
+            }
+            on_progress(RuntimeDownloadProgress {
+                stage: "fabric".to_string(),
+                done: idx + 1,
+                total,
+                message: format!("Fabric libraries {}/{}", idx + 1, total),
+            });
+        }
+    }
+
+    if let Some(main_class) = json.get("mainClass").and_then(|x| x.as_str())
+        && !main_class.trim().is_empty()
+    {
+        profile.main_class = main_class.to_string();
+    }
+    if let Some(jvm_args) = json
+        .get("arguments")
+        .and_then(|x| x.get("jvm"))
+        .and_then(|x| x.as_array())
+    {
+        for arg in jvm_args {
+            if let Some(s) = arg.as_str()
+                && !profile.jvm_args.iter().any(|x| x == s)
+            {
+                profile.jvm_args.push(s.to_string());
+            }
+        }
+    }
+
+    on_progress(RuntimeDownloadProgress {
+        stage: "fabric".to_string(),
+        done: total.max(1),
+        total: total.max(1),
+        message: format!("Fabric runtime ready (+{added} libs)"),
+    });
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct MinecraftProfileResponse {
+    id: String,
     name: String,
 }
 
@@ -989,6 +1162,7 @@ pub fn validate_minecraft_account(access_token: &str) -> Result<AccountValidatio
 
     Ok(AccountValidation {
         username: profile.name,
+        uuid: profile.id,
         has_minecraft_license: !entitlements.items.is_empty(),
     })
 }
@@ -1008,6 +1182,7 @@ struct DeviceCodeResponse {
 #[derive(Deserialize)]
 struct DeviceTokenResponse {
     access_token: Option<String>,
+    refresh_token: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
 }
@@ -1093,6 +1268,53 @@ fn extract_uhs(claims: &XboxDisplayClaims) -> Option<String> {
     None
 }
 
+fn build_http_client(http1_only: bool) -> Result<Client, String> {
+    let mut builder = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .connect_timeout(Duration::from_secs(12))
+        .timeout(Duration::from_secs(45))
+        .tcp_keepalive(Duration::from_secs(30));
+    if http1_only {
+        builder = builder.http1_only();
+    }
+    builder
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))
+}
+
+fn post_json_with_http_fallback(
+    client: &Client,
+    url: &str,
+    body: &serde_json::Value,
+    with_xbl_header: bool,
+) -> Result<reqwest::blocking::Response, String> {
+    let mut req = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json");
+    if with_xbl_header {
+        req = req.header("x-xbl-contract-version", "1");
+    }
+    match req.json(body).send() {
+        Ok(response) => Ok(response),
+        Err(first_err) => {
+            let fallback = build_http_client(true)?;
+            let mut req_fallback = fallback
+                .post(url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json");
+            if with_xbl_header {
+                req_fallback = req_fallback.header("x-xbl-contract-version", "1");
+            }
+            req_fallback.json(body).send().map_err(|second_err| {
+                format!(
+                    "request failed (h2): {first_err}; retry failed (http1): {second_err}"
+                )
+            })
+        }
+    }
+}
+
 pub fn complete_microsoft_device_login(
     client_id: &str,
     device: &MicrosoftDeviceCode,
@@ -1102,14 +1324,12 @@ pub fn complete_microsoft_device_login(
         return Err("MSA client id is empty".to_string());
     }
 
-    let client = Client::builder()
-        .user_agent("PrismarineLauncher-Rust")
-        .build()
-        .map_err(|e| format!("failed to build http client: {e}"))?;
+    let client = build_http_client(false)?;
 
     let mut interval = device.interval.max(1);
     let max_polls = (device.expires_in / interval.max(1)).saturating_add(2);
     let mut msa_access_token = String::new();
+    let mut msa_refresh_token = None::<String>;
 
     for _ in 0..max_polls {
         thread::sleep(Duration::from_secs(interval));
@@ -1130,6 +1350,7 @@ pub fn complete_microsoft_device_login(
         if status.is_success() {
             if let Some(token) = parsed.access_token {
                 msa_access_token = token;
+                msa_refresh_token = parsed.refresh_token;
                 break;
             }
             return Err("device token response missing access_token".to_string());
@@ -1156,12 +1377,61 @@ pub fn complete_microsoft_device_login(
         return Err("device login timed out".to_string());
     }
 
-    let xbox_user = client
-        .post("https://user.auth.xboxlive.com/user/authenticate")
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("x-xbl-contract-version", "1")
-        .json(&serde_json::json!({
+    let mut account = exchange_msa_access_token_for_minecraft_account(&client, &msa_access_token)?;
+    account.refresh_token = msa_refresh_token;
+    Ok(account)
+}
+
+pub fn refresh_microsoft_account(
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<LicensedMicrosoftAccount, String> {
+    let id = client_id.trim();
+    if id.is_empty() {
+        return Err("MSA client id is empty".to_string());
+    }
+    let refresh = refresh_token.trim();
+    if refresh.is_empty() {
+        return Err("refresh token is empty".to_string());
+    }
+
+    let client = build_http_client(false)?;
+    let response = client
+        .post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
+        .form(&[
+            ("client_id", id),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("scope", "XboxLive.SignIn XboxLive.offline_access"),
+        ])
+        .send()
+        .map_err(|e| format!("refresh token request failed: {e}"))?;
+    let status = response.status();
+    let parsed = response
+        .json::<DeviceTokenResponse>()
+        .map_err(|e| format!("failed to parse refresh token response: {e}"))?;
+    if !status.is_success() {
+        let code = parsed.error.unwrap_or_else(|| format!("http {status}"));
+        let msg = parsed.error_description.unwrap_or_default();
+        return Err(if msg.is_empty() {
+            format!("refresh token error: {code}")
+        } else {
+            format!("refresh token error: {code}: {msg}")
+        });
+    }
+    let msa_access = parsed
+        .access_token
+        .ok_or_else(|| "refresh token response missing access_token".to_string())?;
+    let mut account = exchange_msa_access_token_for_minecraft_account(&client, &msa_access)?;
+    account.refresh_token = parsed.refresh_token.or_else(|| Some(refresh.to_string()));
+    Ok(account)
+}
+
+fn exchange_msa_access_token_for_minecraft_account(
+    client: &Client,
+    msa_access_token: &str,
+) -> Result<LicensedMicrosoftAccount, String> {
+    let xbox_user_body = serde_json::json!({
             "Properties": {
                 "AuthMethod": "RPS",
                 "SiteName": "user.auth.xboxlive.com",
@@ -1169,9 +1439,14 @@ pub fn complete_microsoft_device_login(
             },
             "RelyingParty": "http://auth.xboxlive.com",
             "TokenType": "JWT",
-        }))
-        .send()
-        .map_err(|e| format!("xbox user auth request failed: {e}"))?;
+        });
+    let xbox_user = post_json_with_http_fallback(
+        &client,
+        "https://user.auth.xboxlive.com/user/authenticate",
+        &xbox_user_body,
+        true,
+    )
+    .map_err(|e| format!("xbox user auth request failed: {e}"))?;
     if !xbox_user.status().is_success() {
         return Err(format!("xbox user auth returned {}", xbox_user.status()));
     }
@@ -1181,21 +1456,21 @@ pub fn complete_microsoft_device_login(
     let uhs = extract_uhs(&xbox_user.display_claims)
         .ok_or_else(|| "xbox user auth missing user hash".to_string())?;
 
-    let xsts = client
-        .post("https://xsts.auth.xboxlive.com/xsts/authorize")
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("x-xbl-contract-version", "1")
-        .json(&serde_json::json!({
+    let xsts_body = serde_json::json!({
             "Properties": {
                 "SandboxId": "RETAIL",
                 "UserTokens": [xbox_user.token],
             },
             "RelyingParty": "rp://api.minecraftservices.com/",
             "TokenType": "JWT",
-        }))
-        .send()
-        .map_err(|e| format!("xsts authorize request failed: {e}"))?;
+        });
+    let xsts = post_json_with_http_fallback(
+        &client,
+        "https://xsts.auth.xboxlive.com/xsts/authorize",
+        &xsts_body,
+        true,
+    )
+    .map_err(|e| format!("xsts authorize request failed: {e}"))?;
     if !xsts.status().is_success() {
         return Err(format!("xsts authorize returned {}", xsts.status()));
     }
@@ -1208,16 +1483,17 @@ pub fn complete_microsoft_device_login(
         return Err("xsts user hash does not match xbox user hash".to_string());
     }
 
-    let mc_login = client
-        .post("https://api.minecraftservices.com/launcher/login")
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .json(&serde_json::json!({
+    let mc_login_body = serde_json::json!({
             "xtoken": format!("XBL3.0 x={uhs};{}", xsts.token),
             "platform": "PC_LAUNCHER",
-        }))
-        .send()
-        .map_err(|e| format!("minecraft launcher login request failed: {e}"))?;
+        });
+    let mc_login = post_json_with_http_fallback(
+        &client,
+        "https://api.minecraftservices.com/launcher/login",
+        &mc_login_body,
+        false,
+    )
+    .map_err(|e| format!("minecraft launcher login request failed: {e}"))?;
     if !mc_login.status().is_success() {
         return Err(format!("minecraft launcher login returned {}", mc_login.status()));
     }
@@ -1228,7 +1504,9 @@ pub fn complete_microsoft_device_login(
     let validation = validate_minecraft_account(&mc_login.access_token)?;
     Ok(LicensedMicrosoftAccount {
         username: validation.username,
+        uuid: validation.uuid,
         access_token: mc_login.access_token,
+        refresh_token: None,
         has_minecraft_license: validation.has_minecraft_license,
     })
 }
@@ -1260,6 +1538,12 @@ struct ModrinthVersionFileResponse {
     url: String,
     filename: String,
     primary: Option<bool>,
+    hashes: Option<ModrinthVersionFileHashesResponse>,
+}
+
+#[derive(Deserialize)]
+struct ModrinthVersionFileHashesResponse {
+    sha1: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1304,9 +1588,6 @@ pub fn modrinth_search_projects_by_type_paged(
     offset: usize,
 ) -> Result<Vec<ModrinthSearchHit>, String> {
     let q = query.trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
     let project_type = project_type.trim();
     if project_type.is_empty() {
         return Err("modrinth project_type is empty".to_string());
@@ -1319,15 +1600,21 @@ pub fn modrinth_search_projects_by_type_paged(
 
     let facets = format!("[[\"project_type:{project_type}\"]]");
     let mut parsed: Option<ModrinthSearchResponse> = None;
-    let sort_indices = [None, Some("downloads"), Some("updated"), Some("newest")];
+    let sort_indices = if q.is_empty() {
+        [Some("downloads"), Some("updated"), Some("newest"), None]
+    } else {
+        [None, Some("downloads"), Some("updated"), Some("newest")]
+    };
     let mut last_error = "unknown modrinth error".to_string();
     for idx in sort_indices {
-        let mut req = client.get("https://api.modrinth.com/v2/search").query(&[
-            ("query", q),
-            ("limit", &limit.to_string()),
-            ("offset", &offset.to_string()),
-            ("facets", facets.as_str()),
-        ]);
+        let mut req = client
+            .get("https://api.modrinth.com/v2/search")
+            .query(&[("limit", limit)])
+            .query(&[("offset", offset)])
+            .query(&[("facets", facets.as_str())]);
+        if !q.is_empty() {
+            req = req.query(&[("query", q)]);
+        }
         if let Some(index) = idx {
             req = req.query(&[("index", index)]);
         }
@@ -1536,9 +1823,6 @@ pub fn curseforge_search_projects_paged(
     offset: usize,
 ) -> Result<Vec<CurseForgeSearchHit>, String> {
     let q = query.trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
     let key = api_key.trim();
     if key.is_empty() {
         return Err("CurseForge API key is empty".to_string());
@@ -1554,10 +1838,12 @@ pub fn curseforge_search_projects_paged(
         .query(&[
             ("gameId", "432"),
             ("classId", &class_id.to_string()),
-            ("searchFilter", q),
             ("pageSize", &limit.to_string()),
             ("index", &offset.to_string()),
         ]);
+    if !q.is_empty() {
+        req = req.query(&[("searchFilter", q)]);
+    }
     if !game_version.trim().is_empty() {
         req = req.query(&[("gameVersion", game_version.trim())]);
     }
@@ -1791,12 +2077,24 @@ pub fn sync_modrinth_managed_mods(instance_path: &Path) -> Result<usize, String>
 
     let mut updated = 0usize;
     let game_root = instance_path.join("minecraft");
+    let known_mod_dirs = modrinth_mod_dirs(instance_path);
     for item in index.files {
         let rel = item.path.replace('\\', "/");
         if !rel.starts_with("mods/") {
             continue;
         }
         let target = game_root.join(&item.path);
+        let Some(file_name) = Path::new(&item.path).file_name().and_then(|x| x.to_str()) else {
+            continue;
+        };
+        let disabled_name = format!("{file_name}.disabled");
+        let disabled_exists = known_mod_dirs
+            .iter()
+            .any(|dir| dir.join(&disabled_name).is_file());
+        if disabled_exists {
+            // Respect explicit user disable toggle and do not re-download managed jar.
+            continue;
+        }
         let mut needs_download = !target.is_file();
         if !needs_download
             && let Some(expected) = item
@@ -1819,6 +2117,162 @@ pub fn sync_modrinth_managed_mods(instance_path: &Path) -> Result<usize, String>
             .first()
             .ok_or_else(|| format!("mod index entry has no download URL: {}", item.path))?;
         download_file_to_path(url, &target)?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+fn modrinth_mod_dirs(instance_path: &Path) -> Vec<PathBuf> {
+    vec![
+        instance_path.join("mods"),
+        instance_path.join(".minecraft").join("mods"),
+        instance_path.join("minecraft").join("mods"),
+    ]
+}
+
+fn list_mod_jar_paths(instance_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for mods_dir in modrinth_mod_dirs(instance_path) {
+        if !mods_dir.is_dir() {
+            continue;
+        }
+        let entries = fs::read_dir(&mods_dir)
+            .map_err(|e| format!("failed to read mods directory {}: {e}", mods_dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("failed to read mods entry: {e}"))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_jar = path
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("jar"))
+                .unwrap_or(false);
+            if !is_jar {
+                continue;
+            }
+            let key = path
+                .file_name()
+                .and_then(|x| x.to_str())
+                .map(|x| x.to_ascii_lowercase())
+                .unwrap_or_else(|| path.display().to_string());
+            if seen.insert(key) {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn modrinth_json_array_query(value: &str) -> Result<String, String> {
+    serde_json::to_string(&vec![value])
+        .map_err(|e| format!("failed to serialize modrinth query values: {e}"))
+}
+
+pub fn update_installed_modrinth_mods(
+    instance_path: &Path,
+    game_version: &str,
+    loader: &str,
+) -> Result<usize, String> {
+    let game_version = game_version.trim();
+    if game_version.is_empty() {
+        return Ok(0);
+    }
+
+    let jar_paths = list_mod_jar_paths(instance_path)?;
+    if jar_paths.is_empty() {
+        return Ok(0);
+    }
+
+    let game_versions_json = modrinth_json_array_query(game_version)?;
+    let loader_json = if loader.trim().is_empty() {
+        None
+    } else {
+        Some(modrinth_json_array_query(loader.trim())?)
+    };
+
+    let client = Client::builder()
+        .user_agent("PrismarineLauncher-Rust")
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let mut updated = 0usize;
+    for path in jar_paths {
+        let current_sha1 = match file_sha1_hex(&path) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let url = format!("https://api.modrinth.com/v2/version_file/{current_sha1}/update");
+        let mut request = client
+            .get(url)
+            .query(&[("algorithm", "sha1"), ("game_versions", &game_versions_json)]);
+        if let Some(loader_json) = &loader_json {
+            request = request.query(&[("loaders", loader_json)]);
+        }
+        let response = match request.send() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if !response.status().is_success() {
+            continue;
+        }
+        let version = match response.json::<ModrinthVersionResponse>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let Some(file) = version
+            .files
+            .iter()
+            .find(|f| f.primary.unwrap_or(false))
+            .or_else(|| version.files.first())
+        else {
+            continue;
+        };
+
+        let target_sha1 = file
+            .hashes
+            .as_ref()
+            .and_then(|h| h.sha1.as_ref())
+            .map(|x| x.to_ascii_lowercase());
+        if target_sha1
+            .as_ref()
+            .map(|sha1| sha1 == &current_sha1)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let temp_name = format!(
+            ".{}.download",
+            path.file_name().and_then(|x| x.to_str()).unwrap_or("mod")
+        );
+        let temp_path = path.with_file_name(temp_name);
+        if let Err(err) = download_file_to_path(&file.url, &temp_path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!(
+                "failed to download updated mod for {}: {err}",
+                path.display()
+            ));
+        }
+        if let Some(expected) = target_sha1.as_ref() {
+            let downloaded = file_sha1_hex(&temp_path)?;
+            if &downloaded != expected {
+                let _ = fs::remove_file(&temp_path);
+                return Err(format!(
+                    "mod update hash mismatch for {} (expected {}, got {})",
+                    path.display(),
+                    expected,
+                    downloaded
+                ));
+            }
+        }
+        fs::rename(&temp_path, &path).map_err(|e| {
+            let _ = fs::remove_file(&temp_path);
+            format!("failed to replace mod file {}: {e}", path.display())
+        })?;
         updated += 1;
     }
     Ok(updated)

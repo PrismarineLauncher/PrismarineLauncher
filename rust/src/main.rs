@@ -1,17 +1,19 @@
 use anyhow::Result;
+use arboard::Clipboard;
 use eframe::{App, Frame, NativeOptions, egui};
 use rust_core::{
     CurseForgeProjectDetails, CurseForgeSearchHit, LaunchProfile, LicensedMicrosoftAccount,
-    MicrosoftDeviceCode, ModrinthProjectDetails, ModrinthSearchHit, RuntimeDownloadProgress,
-    build_java_command, complete_microsoft_device_login, copy_instance, create_instance,
-    curseforge_get_project_details, curseforge_resolve_primary_file,
-    curseforge_search_projects_paged, default_launch_profile, delete_instance,
-    download_file_to_path, download_file_to_path_with_progress,
+    MicrosoftDeviceCode, ModrinthProjectDetails, ModrinthSearchHit, PrismInstanceConfig,
+    RuntimeDownloadProgress, build_java_command, complete_microsoft_device_login, copy_instance,
+    create_instance, curseforge_get_project_details, curseforge_resolve_primary_file,
+    curseforge_search_projects_paged, default_launch_profile, delete_instance, download_file_to_path,
+    download_file_to_path_with_progress, ensure_fabric_runtime_with_progress,
     ensure_minecraft_runtime_with_progress, format_s3_time, list_logs, list_mod_files,
     load_launch_profile, load_prism_instance_config, modrinth_get_project_details,
     modrinth_resolve_primary_file, modrinth_search_projects_by_type_paged, parse_s3_time,
-    read_log_preview, rename_instance, save_launch_profile, scan_instances,
-    start_microsoft_device_code, sync_modrinth_managed_mods, validate_minecraft_account,
+    read_log_preview, refresh_microsoft_account, rename_instance, save_launch_profile, scan_instances,
+    start_microsoft_device_code, sync_modrinth_managed_mods, update_installed_modrinth_mods,
+    validate_minecraft_account,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -50,6 +52,18 @@ enum SettingsSubTab {
 impl Default for SettingsSubTab {
     fn default() -> Self {
         Self::General
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum SettingsTarget {
+    Global,
+    Instance,
+}
+
+impl Default for SettingsTarget {
+    fn default() -> Self {
+        Self::Global
     }
 }
 
@@ -93,6 +107,10 @@ impl Default for DownloadProvider {
 enum DownloadContentType {
     Mods,
     ResourcePacks,
+    ShaderPacks,
+    Worlds,
+    Servers,
+    Screenshots,
 }
 
 impl DownloadContentType {
@@ -100,6 +118,8 @@ impl DownloadContentType {
         match self {
             Self::Mods => "mod",
             Self::ResourcePacks => "resourcepack",
+            Self::ShaderPacks => "shader",
+            Self::Worlds | Self::Servers | Self::Screenshots => "mod",
         }
     }
 
@@ -107,6 +127,8 @@ impl DownloadContentType {
         match self {
             Self::Mods => "mc-mods",
             Self::ResourcePacks => "texture-packs",
+            Self::ShaderPacks => "shader-packs",
+            Self::Worlds | Self::Servers | Self::Screenshots => "mc-mods",
         }
     }
 
@@ -114,6 +136,8 @@ impl DownloadContentType {
         match self {
             Self::Mods => 6,
             Self::ResourcePacks => 12,
+            Self::ShaderPacks => 6552,
+            Self::Worlds | Self::Servers | Self::Screenshots => 6,
         }
     }
 }
@@ -177,13 +201,33 @@ impl CreateLoader {
 struct Instance {
     name: String,
     version: String,
+    loader: String,
     running: bool,
     path: String,
+    icon_path: Option<String>,
+    group: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct InstanceGroupMeta {
+    name: String,
     icon_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct ModListEntry {
+    name: String,
+    file_path: String,
+    enabled: bool,
+    display_name: String,
+    version: String,
+    updated_at: String,
+    provider: String,
+    icon_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ContentListEntry {
     name: String,
     file_path: String,
     enabled: bool,
@@ -201,6 +245,8 @@ struct Account {
     active: bool,
     account_type: AccountType,
     access_token: Option<String>,
+    refresh_token: Option<String>,
+    uuid: Option<String>,
     licensed: bool,
 }
 
@@ -211,6 +257,8 @@ impl Default for Account {
             active: false,
             account_type: AccountType::Offline,
             access_token: None,
+            refresh_token: None,
+            uuid: None,
             licensed: false,
         }
     }
@@ -236,10 +284,10 @@ impl Default for GlobalLaunchSettings {
             mode: LaunchSettingsMode::Basic,
             java_path: "java".to_string(),
             skip_java_compat_check: false,
-            min_memory_mb: 1024,
-            max_memory_mb: 4096,
+            min_memory_mb: 512,
+            max_memory_mb: suitable_default_max_mem_mb(),
             permgen_mb: 128,
-            advanced_jvm_args: "-Xms1G\n-Xmx4G".to_string(),
+            advanced_jvm_args: String::new(),
             user_commands: String::new(),
             environment_vars: String::new(),
         }
@@ -256,6 +304,8 @@ struct PersistedState {
     filter: String,
     #[serde(default)]
     active_tab: CenterTab,
+    #[serde(default)]
+    last_seen_launcher_version: String,
 }
 
 impl Default for PersistedState {
@@ -265,8 +315,15 @@ impl Default for PersistedState {
             show_news: true,
             filter: String::new(),
             active_tab: CenterTab::Overview,
+            last_seen_launcher_version: String::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct PersistedRunningProcess {
+    instance_path: String,
+    pid: u32,
 }
 
 fn default_true() -> bool {
@@ -295,16 +352,37 @@ fn global_settings_file_path() -> PathBuf {
     local_data_root().join("global_launch_settings.json")
 }
 
+fn groups_file_path() -> PathBuf {
+    local_data_root().join("instance_groups.json")
+}
+
+fn running_processes_file_path() -> PathBuf {
+    local_data_root().join("running_processes.json")
+}
+
 fn instances_root_path() -> PathBuf {
     local_data_root().join("instances")
 }
 
 const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
+const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
+const LAUNCHER_VERSION_MAJOR: u32 = 1;
+const LAUNCHER_VERSION_BUILD: u32 = 1;
+
+fn launcher_version_string() -> String {
+    format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
+}
 
 enum DeviceLoginEvent {
     Success(LicensedMicrosoftAccount),
     Error(String),
+}
+
+#[derive(Clone, Debug)]
+enum AccountAvatarEvent {
+    Ready { key: String },
+    Error { key: String },
 }
 
 #[derive(Clone, Debug)]
@@ -355,6 +433,25 @@ enum LaunchWorkerEvent {
     Progress {
         instance_path: String,
         progress: RuntimeDownloadProgress,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum ImportWorkerEvent {
+    Progress {
+        stage: String,
+        done: usize,
+        total: usize,
+        message: String,
+    },
+    Finished {
+        instance_name: String,
+        instance_path: PathBuf,
+        group: String,
+        summary: ImportSummary,
+    },
+    Error {
+        message: String,
     },
 }
 
@@ -413,6 +510,24 @@ struct DownloadJob {
     progress: f32,
 }
 
+#[derive(Clone, Debug, Default)]
+struct ImportUiProgress {
+    stage: String,
+    done: usize,
+    total: usize,
+    message: String,
+}
+
+#[derive(Clone, Debug)]
+struct LaunchToast {
+    title: String,
+    subtitle: String,
+    icon_path: Option<String>,
+    loader: String,
+    is_error: bool,
+    shown_at: Instant,
+}
+
 #[derive(Clone, Debug)]
 enum DownloadQueueEvent {
     Resolving {
@@ -436,6 +551,7 @@ enum DownloadQueueEvent {
 
 struct PrismarineApp {
     instances: Vec<Instance>,
+    groups: Vec<InstanceGroupMeta>,
     accounts: Vec<Account>,
     selected: Option<usize>,
     last_selected: Option<usize>,
@@ -447,6 +563,7 @@ struct PrismarineApp {
     show_create_dialog: bool,
     create_mode: CreateMode,
     create_name: String,
+    create_group: String,
     create_game_version: String,
     create_loader: Option<CreateLoader>,
     create_import_path: String,
@@ -455,7 +572,20 @@ struct PrismarineApp {
     show_copy_dialog: bool,
     copy_name: String,
     show_delete_dialog: bool,
+    show_create_group_dialog: bool,
+    show_rename_group_dialog: bool,
+    show_set_icon_dialog: bool,
+    set_icon_target_instance_path: Option<String>,
+    set_icon_dialog_section: u8,
+    create_group_name: String,
+    rename_group_old: String,
+    rename_group_new: String,
     mods_cache: Vec<ModListEntry>,
+    resourcepacks_cache: Vec<ContentListEntry>,
+    shaderpacks_cache: Vec<ContentListEntry>,
+    worlds_cache: Vec<ContentListEntry>,
+    servers_cache: Vec<ContentListEntry>,
+    screenshots_cache: Vec<ContentListEntry>,
     mods_filter: String,
     logs_cache: Vec<(String, String)>,
     selected_log: Option<usize>,
@@ -463,13 +593,20 @@ struct PrismarineApp {
     launch_profile: LaunchProfile,
     processes: HashMap<String, Child>,
     show_add_account_dialog: bool,
+    show_manage_accounts_dialog: bool,
+    manage_account_selected: Option<usize>,
     new_account_name: String,
     new_account_token: String,
+    new_offline_account_name: String,
     device_login_info: Option<MicrosoftDeviceCode>,
     device_login_receiver: Option<Receiver<DeviceLoginEvent>>,
     device_login_status: String,
     device_login_qr_payload: String,
+    account_avatar_tx: Sender<AccountAvatarEvent>,
+    account_avatar_rx: Receiver<AccountAvatarEvent>,
+    account_avatar_pending: HashSet<String>,
     show_download_panel: bool,
+    content_list_ratio: f32,
     download_provider: DownloadProvider,
     download_content_type: DownloadContentType,
     modrinth_query: String,
@@ -486,6 +623,7 @@ struct PrismarineApp {
     curseforge_download_url: String,
     curseforge_filename: String,
     global_settings: GlobalLaunchSettings,
+    settings_target: SettingsTarget,
     settings_subtab: SettingsSubTab,
     icon_cache: HashMap<String, egui::TextureHandle>,
     post_exit_commands: HashMap<String, String>,
@@ -497,6 +635,7 @@ struct PrismarineApp {
     download_search_has_more: bool,
     download_search_debounce_deadline: Option<Instant>,
     download_search_last_input: String,
+    download_search_last_dispatched_query: String,
     download_details_receiver: Option<Receiver<DownloadDetailsEvent>>,
     download_details_request_id: u64,
     download_details_cache: HashMap<String, (DownloadDetails, Instant)>,
@@ -510,9 +649,18 @@ struct PrismarineApp {
     launch_in_progress: HashSet<String>,
     pending_launches: HashMap<String, PendingLaunchContext>,
     launch_progress: HashMap<String, RuntimeDownloadProgress>,
+    import_worker_rx: Option<Receiver<ImportWorkerEvent>>,
+    import_progress: Option<ImportUiProgress>,
     create_versions_loading: bool,
     create_versions: Vec<String>,
     create_versions_receiver: Option<Receiver<Result<Vec<String>, String>>>,
+    dragging_instance_path: Option<String>,
+    last_stopped_instance_path: Option<String>,
+    launch_toast: Option<LaunchToast>,
+    running_process_pids: HashMap<String, u32>,
+    show_version_update_dialog: bool,
+    previous_launcher_version: Option<String>,
+    last_seen_launcher_version: String,
 }
 
 impl Default for PrismarineApp {
@@ -520,6 +668,7 @@ impl Default for PrismarineApp {
         let persisted = load_state().unwrap_or_default();
         let data_root = local_data_root();
         let _ = fs::create_dir_all(instances_root_path());
+        let groups = load_instance_groups();
         let mut accounts = load_accounts();
         if accounts.is_empty() {
             accounts = vec![
@@ -528,6 +677,8 @@ impl Default for PrismarineApp {
                     active: true,
                     account_type: AccountType::Offline,
                     access_token: None,
+                    refresh_token: None,
+                    uuid: None,
                     licensed: false,
                 },
                 Account {
@@ -535,14 +686,22 @@ impl Default for PrismarineApp {
                     active: false,
                     account_type: AccountType::Offline,
                     access_token: None,
+                    refresh_token: None,
+                    uuid: None,
                     licensed: false,
                 },
             ];
         }
         let (download_queue_tx, download_queue_rx) = mpsc::channel::<DownloadQueueEvent>();
         let (launch_worker_tx, launch_worker_rx) = mpsc::channel::<LaunchWorkerEvent>();
+        let (account_avatar_tx, account_avatar_rx) = mpsc::channel::<AccountAvatarEvent>();
+        let current_version = launcher_version_string();
+        let previous_version = persisted.last_seen_launcher_version.trim().to_string();
+        let show_version_update_dialog =
+            !previous_version.is_empty() && previous_version != current_version;
         let mut app = Self {
             instances: Vec::new(),
+            groups,
             accounts,
             selected: persisted.selected,
             last_selected: None,
@@ -554,6 +713,7 @@ impl Default for PrismarineApp {
             show_create_dialog: false,
             create_mode: CreateMode::Custom,
             create_name: String::new(),
+            create_group: String::new(),
             create_game_version: String::new(),
             create_loader: None,
             create_import_path: String::new(),
@@ -562,7 +722,20 @@ impl Default for PrismarineApp {
             show_copy_dialog: false,
             copy_name: String::new(),
             show_delete_dialog: false,
+            show_create_group_dialog: false,
+            show_rename_group_dialog: false,
+            show_set_icon_dialog: false,
+            set_icon_target_instance_path: None,
+            set_icon_dialog_section: 0,
+            create_group_name: String::new(),
+            rename_group_old: String::new(),
+            rename_group_new: String::new(),
             mods_cache: Vec::new(),
+            resourcepacks_cache: Vec::new(),
+            shaderpacks_cache: Vec::new(),
+            worlds_cache: Vec::new(),
+            servers_cache: Vec::new(),
+            screenshots_cache: Vec::new(),
             mods_filter: String::new(),
             logs_cache: Vec::new(),
             selected_log: None,
@@ -570,13 +743,20 @@ impl Default for PrismarineApp {
             launch_profile: default_launch_profile(Path::new(".")),
             processes: HashMap::new(),
             show_add_account_dialog: false,
+            show_manage_accounts_dialog: false,
+            manage_account_selected: None,
             new_account_name: String::new(),
             new_account_token: String::new(),
+            new_offline_account_name: String::new(),
             device_login_info: None,
             device_login_receiver: None,
             device_login_status: String::new(),
             device_login_qr_payload: String::new(),
+            account_avatar_tx,
+            account_avatar_rx,
+            account_avatar_pending: HashSet::new(),
             show_download_panel: false,
+            content_list_ratio: 0.58,
             download_provider: DownloadProvider::Modrinth,
             download_content_type: DownloadContentType::Mods,
             modrinth_query: String::new(),
@@ -593,6 +773,7 @@ impl Default for PrismarineApp {
             curseforge_download_url: String::new(),
             curseforge_filename: String::new(),
             global_settings: load_global_settings(),
+            settings_target: SettingsTarget::Global,
             settings_subtab: SettingsSubTab::General,
             icon_cache: HashMap::new(),
             post_exit_commands: HashMap::new(),
@@ -604,6 +785,7 @@ impl Default for PrismarineApp {
             download_search_has_more: true,
             download_search_debounce_deadline: None,
             download_search_last_input: String::new(),
+            download_search_last_dispatched_query: String::new(),
             download_details_receiver: None,
             download_details_request_id: 0,
             download_details_cache: HashMap::new(),
@@ -617,47 +799,664 @@ impl Default for PrismarineApp {
             launch_in_progress: HashSet::new(),
             pending_launches: HashMap::new(),
             launch_progress: HashMap::new(),
+            import_worker_rx: None,
+            import_progress: None,
             create_versions_loading: false,
             create_versions: Vec::new(),
             create_versions_receiver: None,
+            dragging_instance_path: None,
+            last_stopped_instance_path: None,
+            launch_toast: None,
+            running_process_pids: HashMap::new(),
+            show_version_update_dialog,
+            previous_launcher_version: if show_version_update_dialog {
+                Some(previous_version)
+            } else {
+                None
+            },
+            last_seen_launcher_version: current_version,
         };
         app.reload_instances();
+        app.restore_running_processes();
+        app.sync_process_states();
         app
     }
 }
 
 impl PrismarineApp {
+    fn is_pid_alive_for_instance(instance_path: &str, pid: u32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+            if !proc_dir.is_dir() {
+                return false;
+            }
+            let cwd = match fs::read_link(proc_dir.join("cwd")) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            let inst = Path::new(instance_path);
+            cwd.starts_with(inst)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = instance_path;
+            let _ = pid;
+            false
+        }
+    }
+
+    fn persist_running_processes(&self) {
+        let list: Vec<PersistedRunningProcess> = self
+            .running_process_pids
+            .iter()
+            .map(|(instance_path, pid)| PersistedRunningProcess {
+                instance_path: instance_path.clone(),
+                pid: *pid,
+            })
+            .collect();
+        let path = running_processes_file_path();
+        if list.is_empty() {
+            let _ = fs::remove_file(path);
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(
+            &path,
+            serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+
+    fn restore_running_processes(&mut self) {
+        let path = running_processes_file_path();
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(list) = serde_json::from_str::<Vec<PersistedRunningProcess>>(&text) else {
+            return;
+        };
+        self.running_process_pids.clear();
+        for item in list {
+            if Self::is_pid_alive_for_instance(&item.instance_path, item.pid) {
+                self.running_process_pids
+                    .insert(item.instance_path.clone(), item.pid);
+            }
+        }
+        self.persist_running_processes();
+    }
+
+    fn running_pid_for_instance(&mut self, instance_path: &str) -> Option<u32> {
+        let pid = self.running_process_pids.get(instance_path).copied()?;
+        if Self::is_pid_alive_for_instance(instance_path, pid) {
+            Some(pid)
+        } else {
+            self.running_process_pids.remove(instance_path);
+            self.persist_running_processes();
+            None
+        }
+    }
+
     fn selected_instance(&self) -> Option<&Instance> {
         self.selected.and_then(|i| self.instances.get(i))
+    }
+
+    fn make_launch_toast_for_instance(
+        &mut self,
+        instance: &Instance,
+        title: &str,
+        subtitle: String,
+        is_error: bool,
+    ) {
+        self.launch_toast = Some(LaunchToast {
+            title: title.to_string(),
+            subtitle,
+            icon_path: instance.icon_path.clone(),
+            loader: instance.loader.clone(),
+            is_error,
+            shown_at: Instant::now(),
+        });
+    }
+
+    fn make_launch_toast_for_path(
+        &mut self,
+        instance_path: &str,
+        title: &str,
+        subtitle: String,
+        is_error: bool,
+    ) {
+        if let Some(instance) = self.instances.iter().find(|i| i.path == instance_path).cloned() {
+            self.make_launch_toast_for_instance(&instance, title, subtitle, is_error);
+        } else {
+            self.launch_toast = Some(LaunchToast {
+                title: title.to_string(),
+                subtitle,
+                icon_path: None,
+                loader: "vanilla".to_string(),
+                is_error,
+                shown_at: Instant::now(),
+            });
+        }
+    }
+
+    fn group_icon_path(&self, group_name: &str) -> Option<String> {
+        self.groups
+            .iter()
+            .find(|g| g.name == group_name)
+            .and_then(|g| g.icon_path.clone())
+    }
+
+    fn all_group_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .groups
+            .iter()
+            .map(|g| g.name.clone())
+            .filter(|x| !x.trim().is_empty())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn sync_groups_with_instances(&mut self) {
+        let mut names = self.all_group_names();
+        for i in &self.instances {
+            let g = i.group.trim();
+            if !g.is_empty() && !names.iter().any(|x| x == g) {
+                names.push(g.to_string());
+            }
+        }
+        names.sort();
+        let mut merged = Vec::new();
+        for n in names {
+            let existing = self.groups.iter().find(|g| g.name == n).cloned();
+            merged.push(existing.unwrap_or(InstanceGroupMeta {
+                name: n,
+                icon_path: None,
+            }));
+        }
+        self.groups = merged;
+        save_instance_groups(&self.groups);
+    }
+
+    fn do_create_group(&mut self) {
+        let name = self.create_group_name.trim();
+        if name.is_empty() {
+            self.status = "Group name must not be empty".to_string();
+            return;
+        }
+        if self.groups.iter().any(|g| g.name.eq_ignore_ascii_case(name)) {
+            self.status = format!("Group already exists: {name}");
+            return;
+        }
+        self.groups.push(InstanceGroupMeta {
+            name: name.to_string(),
+            icon_path: None,
+        });
+        self.groups.sort_by(|a, b| a.name.cmp(&b.name));
+        save_instance_groups(&self.groups);
+        self.create_group = name.to_string();
+        self.status = format!("Created group: {name}");
+        self.create_group_name.clear();
+        self.show_create_group_dialog = false;
+    }
+
+    fn do_rename_group(&mut self) {
+        let old_name = self.rename_group_old.trim().to_string();
+        let new_name = self.rename_group_new.trim().to_string();
+        if old_name.is_empty() || new_name.is_empty() {
+            self.status = "Old and new group names are required".to_string();
+            return;
+        }
+        if old_name == new_name {
+            self.status = "Group name is unchanged".to_string();
+            return;
+        }
+        if self
+            .groups
+            .iter()
+            .any(|g| g.name.eq_ignore_ascii_case(&new_name))
+        {
+            self.status = format!("Group already exists: {new_name}");
+            return;
+        }
+        let mut found = false;
+        for g in &mut self.groups {
+            if g.name == old_name {
+                g.name = new_name.clone();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            self.status = format!("Group not found: {old_name}");
+            return;
+        }
+        for instance in &mut self.instances {
+            if instance.group == old_name {
+                instance.group = new_name.clone();
+                let _ = set_instance_cfg_value(Path::new(&instance.path), "Group", Some(&new_name));
+            }
+        }
+        self.groups.sort_by(|a, b| a.name.cmp(&b.name));
+        save_instance_groups(&self.groups);
+        if self.create_group == old_name {
+            self.create_group = new_name.clone();
+        }
+        self.status = format!("Renamed group: {old_name} -> {new_name}");
+        self.show_rename_group_dialog = false;
+        self.rename_group_old.clear();
+        self.rename_group_new.clear();
+    }
+
+    fn do_assign_selected_instance_group(&mut self, group_name: &str) {
+        let Some(idx) = self.selected else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        if idx >= self.instances.len() {
+            return;
+        }
+        let path = self.instances[idx].path.clone();
+        self.do_assign_instance_group_by_path(&path, group_name);
+    }
+
+    fn do_assign_instance_group_by_path(&mut self, instance_path: &str, group_name: &str) {
+        let Some(idx) = self
+            .instances
+            .iter()
+            .position(|x| x.path == instance_path)
+        else {
+            self.status = "Instance not found".to_string();
+            return;
+        };
+        self.instances[idx].group = group_name.to_string();
+        let path = PathBuf::from(&self.instances[idx].path);
+        let write_result = if group_name.trim().is_empty() {
+            set_instance_cfg_value(&path, "Group", None)
+        } else {
+            set_instance_cfg_value(&path, "Group", Some(group_name))
+        };
+        match write_result {
+            Ok(_) => {
+                self.sync_groups_with_instances();
+                self.status = if group_name.trim().is_empty() {
+                    format!("Removed instance from group: {}", self.instances[idx].name)
+                } else {
+                    format!("Moved {} to group {}", self.instances[idx].name, group_name)
+                };
+            }
+            Err(err) => {
+                self.status = format!("Failed to update instance group: {err}");
+            }
+        }
+    }
+
+    fn do_set_selected_instance_loader(&mut self, loader: Option<CreateLoader>) {
+        let Some(instance_path) = self.selected_instance_path() else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        let instance_path_s = instance_path.display().to_string();
+        let previous_selected_path = self.selected_instance().map(|x| x.path.clone());
+        let version = self.detect_instance_version(&instance_path);
+
+        let mmc_pack_path = instance_path.join("mmc-pack.json");
+        let mut mmc_json = if let Ok(text) = fs::read_to_string(&mmc_pack_path) {
+            serde_json::from_str::<serde_json::Value>(&text).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "formatVersion": 1,
+                    "components": []
+                })
+            })
+        } else {
+            serde_json::json!({
+                "formatVersion": 1,
+                "components": []
+            })
+        };
+
+        if mmc_json.get("formatVersion").is_none() {
+            mmc_json["formatVersion"] = serde_json::json!(1);
+        }
+        if !mmc_json.get("components").is_some_and(|v| v.is_array()) {
+            mmc_json["components"] = serde_json::json!([]);
+        }
+
+        let mut components = mmc_json
+            .get("components")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if !components.iter().any(|c| {
+            c.get("uid")
+                .and_then(|v| v.as_str())
+                .is_some_and(|u| u == "net.minecraft")
+        }) {
+            let mc_version = if version != "unknown" {
+                version.clone()
+            } else {
+                "latest".to_string()
+            };
+            components.insert(
+                0,
+                serde_json::json!({
+                    "uid": "net.minecraft",
+                    "version": mc_version
+                }),
+            );
+        }
+
+        components.retain(|c| {
+            let uid = c.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
+            uid != "net.fabricmc.fabric-loader"
+                && uid != "org.quiltmc.quilt-loader"
+                && uid != "net.minecraftforge"
+                && uid != "net.neoforged"
+                && !uid.contains("neoforge")
+        });
+
+        if let Some(loader) = &loader {
+            components.push(serde_json::json!({
+                "uid": loader.mmc_uid(),
+                "version": "0.0.0"
+            }));
+        }
+
+        mmc_json["components"] = serde_json::Value::Array(components);
+        let mmc_text =
+            serde_json::to_string_pretty(&mmc_json).unwrap_or_else(|_| "{}".to_string());
+        if let Err(err) = fs::write(&mmc_pack_path, mmc_text) {
+            self.status = format!("Failed to update loader in mmc-pack.json: {err}");
+            return;
+        }
+
+        let managed_loader = loader
+            .as_ref()
+            .map(CreateLoader::cfg_value)
+            .unwrap_or("vanilla");
+        if let Err(err) = set_instance_cfg_value(&instance_path, "ManagedLoader", Some(managed_loader))
+        {
+            self.status = format!("Failed to update loader in instance.cfg: {err}");
+            return;
+        }
+
+        if let Ok(mut profile) = load_launch_profile(&instance_path) {
+            profile.classpath.clear();
+            if let Err(err) = save_launch_profile(&instance_path, &profile) {
+                self.status = format!("Failed to reset launch profile after loader change: {err}");
+                return;
+            }
+        }
+
+        self.reload_instances();
+        if let Some(prev_path) = previous_selected_path
+            && let Some(pos) = self.instances.iter().position(|x| x.path == prev_path)
+        {
+            self.selected = Some(pos);
+        } else if let Some(pos) = self
+            .instances
+            .iter()
+            .position(|x| x.path == instance_path_s)
+        {
+            self.selected = Some(pos);
+        }
+        self.refresh_selected_content();
+        self.status = match loader {
+            Some(loader) => format!("Loader updated: {}", loader.label()),
+            None => "Loader removed (Vanilla)".to_string(),
+        };
+    }
+
+    #[allow(dead_code)]
+    fn do_set_instance_icon(&mut self) {
+        let Some(idx) = self.selected else {
+            self.status = "No instance selected".to_string();
+            return;
+        };
+        if idx >= self.instances.len() {
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "ico", "webp", "gif", "svg"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(icon_key) = copy_image_to_icon_store(&self.data_root, &path, &self.instances[idx].name)
+        else {
+            self.status = "Failed to import instance icon".to_string();
+            return;
+        };
+        match set_instance_cfg_value(Path::new(&self.instances[idx].path), "iconKey", Some(&icon_key)) {
+            Ok(_) => {
+                self.status = format!("Updated icon for {}", self.instances[idx].name);
+                self.reload_instances();
+            }
+            Err(err) => {
+                self.status = format!("Failed to update instance icon: {err}");
+            }
+        }
+    }
+
+    fn open_set_icon_dialog_for_instance(&mut self, idx: usize) {
+        if idx >= self.instances.len() {
+            self.status = "No instance selected".to_string();
+            return;
+        }
+        self.set_icon_target_instance_path = Some(self.instances[idx].path.clone());
+        self.set_icon_dialog_section = 0;
+        self.show_set_icon_dialog = true;
+    }
+
+    fn apply_instance_icon_key(&mut self, instance_path: &str, icon_key: Option<&str>) {
+        let value = icon_key.and_then(|v| {
+            let t = v.trim();
+            if t.is_empty() { None } else { Some(t) }
+        });
+        match set_instance_cfg_value(Path::new(instance_path), "iconKey", value) {
+            Ok(_) => {
+                self.status = if let Some(key) = value {
+                    format!("Updated instance icon: {key}")
+                } else {
+                    "Instance icon reset to default".to_string()
+                };
+                self.reload_instances();
+            }
+            Err(err) => {
+                self.status = format!("Failed to set instance icon: {err}");
+            }
+        }
+    }
+
+    fn write_builtin_icon_to_store(
+        &self,
+        key: &str,
+        ext: &str,
+        bytes: &[u8],
+    ) -> Option<String> {
+        let icons_dir = self.data_root.join("icons");
+        let _ = fs::create_dir_all(&icons_dir);
+        let target = icons_dir.join(format!("{key}.{ext}"));
+        if !target.is_file() {
+            fs::write(&target, bytes).ok()?;
+        }
+        Some(key.to_string())
+    }
+
+    fn import_custom_instance_icon(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpeg", "jpg", "webp", "gif", "svg"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(instance_path) = self.set_icon_target_instance_path.clone() else {
+            self.status = "No target instance for icon".to_string();
+            return;
+        };
+        let base_name = Path::new(&instance_path)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or("instance");
+        let Some(icon_key) = copy_image_to_icon_store(&self.data_root, &path, base_name) else {
+            self.status = "Failed to import custom icon".to_string();
+            return;
+        };
+        self.apply_instance_icon_key(&instance_path, Some(&icon_key));
+        self.show_set_icon_dialog = false;
+    }
+
+    fn list_custom_icon_files(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let icons_dir = self.data_root.join("icons");
+        let Ok(entries) = fs::read_dir(&icons_dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg") {
+                out.push(path.display().to_string());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn do_set_group_icon(&mut self, group_name: &str) {
+        let group_name = group_name.trim().to_string();
+        if group_name.is_empty() {
+            self.status = "Select group first".to_string();
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "ico", "webp", "gif"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(stored) = copy_image_to_group_store(&self.data_root, &path, &group_name) else {
+            self.status = "Failed to import group icon".to_string();
+            return;
+        };
+        if let Some(g) = self.groups.iter_mut().find(|g| g.name == group_name) {
+            g.icon_path = Some(stored);
+            save_instance_groups(&self.groups);
+            self.status = format!("Updated icon for group {group_name}");
+        }
+    }
+
+    fn do_delete_group(&mut self, group_name: &str) {
+        let group_name = group_name.trim();
+        if group_name.is_empty() {
+            self.status = "Cannot delete default group".to_string();
+            return;
+        }
+        for instance in &mut self.instances {
+            if instance.group == group_name {
+                instance.group.clear();
+                let _ = set_instance_cfg_value(Path::new(&instance.path), "Group", None);
+            }
+        }
+        self.groups.retain(|g| g.name != group_name);
+        save_instance_groups(&self.groups);
+        self.status = format!("Deleted group: {group_name}");
     }
 
     fn active_account(&self) -> Option<&Account> {
         self.accounts.iter().find(|x| x.active)
     }
 
-    fn apply_account_launch_args(&self, game_args: &mut Vec<String>) {
+    fn apply_account_launch_args(&mut self, game_args: &mut Vec<String>) {
         remove_arg_pair(game_args, "--username");
         remove_arg_pair(game_args, "--uuid");
         remove_arg_pair(game_args, "--accessToken");
         remove_arg_pair(game_args, "--userType");
         remove_arg_pair(game_args, "--versionType");
 
+        let active_idx = self.accounts.iter().position(|x| x.active);
+        if let Some(i) = active_idx {
+            if self.accounts[i].account_type == AccountType::Licensed {
+                let mut changed = false;
+                let mut token_ok = false;
+                if let Some(token) = self.accounts[i].access_token.clone()
+                    && let Ok(validation) = validate_minecraft_account(&token)
+                {
+                    self.accounts[i].uuid = Some(validation.uuid);
+                    self.accounts[i].name = validation.username;
+                    self.accounts[i].licensed = validation.has_minecraft_license;
+                    token_ok = true;
+                    changed = true;
+                }
+                if !token_ok
+                    && let Some(refresh) = self.accounts[i].refresh_token.clone()
+                {
+                    match refresh_microsoft_account(MSA_CLIENT_ID, &refresh) {
+                        Ok(refreshed) => {
+                            self.accounts[i].name = refreshed.username;
+                            self.accounts[i].uuid = Some(refreshed.uuid);
+                            self.accounts[i].access_token = Some(refreshed.access_token);
+                            self.accounts[i].refresh_token = refreshed.refresh_token;
+                            self.accounts[i].licensed = refreshed.has_minecraft_license;
+                            changed = true;
+                            self.status =
+                                format!("Refreshed Microsoft session for {}", self.accounts[i].name);
+                        }
+                        Err(err) => {
+                            self.accounts[i].licensed = false;
+                            changed = true;
+                            self.status =
+                                format!("Microsoft session expired, re-login required: {err}");
+                        }
+                    }
+                } else if !token_ok {
+                    self.accounts[i].licensed = false;
+                    changed = true;
+                    self.status = "Microsoft session expired, re-login required".to_string();
+                }
+                if changed {
+                    save_accounts(&self.accounts);
+                }
+            }
+        }
+
         let account = self.active_account().cloned().unwrap_or(Account {
             name: "Player".to_string(),
             active: true,
             account_type: AccountType::Offline,
             access_token: None,
+            refresh_token: None,
+            uuid: None,
             licensed: false,
         });
         let username = account.name;
-        let uuid = pseudo_uuid_from_name(&username);
-        let (access_token, user_type) = if account.account_type == AccountType::Licensed {
+        let (uuid, access_token, user_type) = if account.account_type == AccountType::Licensed {
+            let normalized_uuid = account
+                .uuid
+                .as_deref()
+                .map(normalize_minecraft_uuid)
+                .unwrap_or_else(|| pseudo_uuid_from_name(&username));
             (
+                normalized_uuid,
                 account.access_token.unwrap_or_else(|| "0".to_string()),
                 "msa".to_string(),
             )
         } else {
-            ("0".to_string(), "offline".to_string())
+            (
+                pseudo_uuid_from_name(&username),
+                "0".to_string(),
+                "offline".to_string(),
+            )
         };
 
         game_args.push("--username".to_string());
@@ -687,6 +1486,205 @@ impl PrismarineApp {
         save_accounts(&self.accounts);
     }
 
+    fn clear_active_account(&mut self) {
+        for account in &mut self.accounts {
+            account.active = false;
+        }
+        save_accounts(&self.accounts);
+    }
+
+    fn add_offline_account(&mut self) {
+        let raw = self.new_offline_account_name.trim().to_string();
+        let name = if raw.is_empty() {
+            let mut idx = self.accounts.len() + 1;
+            loop {
+                let candidate = format!("Offline{idx}");
+                if !self.accounts.iter().any(|a| a.name == candidate) {
+                    break candidate;
+                }
+                idx += 1;
+            }
+        } else {
+            raw
+        };
+        self.accounts.push(Account {
+            name: name.clone(),
+            active: false,
+            account_type: AccountType::Offline,
+            access_token: None,
+            refresh_token: None,
+            uuid: None,
+            licensed: false,
+        });
+        save_accounts(&self.accounts);
+        self.status = format!("Offline account added: {name}");
+        self.new_offline_account_name.clear();
+    }
+
+    fn delete_selected_account(&mut self) {
+        let Some(idx) = self.manage_account_selected else {
+            self.status = "Select account first".to_string();
+            return;
+        };
+        if idx >= self.accounts.len() {
+            return;
+        }
+        let removed = self.accounts.remove(idx);
+        if self.accounts.is_empty() {
+            self.accounts.push(Account {
+                name: "Offline".to_string(),
+                active: true,
+                account_type: AccountType::Offline,
+                access_token: None,
+                refresh_token: None,
+                uuid: None,
+                licensed: false,
+            });
+        }
+        if !self.accounts.iter().any(|a| a.active)
+            && let Some(first) = self.accounts.first_mut()
+        {
+            first.active = true;
+        }
+        self.manage_account_selected = self.accounts.get(idx).map(|_| idx).or_else(|| {
+            if self.accounts.is_empty() {
+                None
+            } else {
+                Some(self.accounts.len() - 1)
+            }
+        });
+        save_accounts(&self.accounts);
+        self.status = format!("Removed account: {}", removed.name);
+    }
+
+    fn move_selected_account(&mut self, delta: isize) {
+        let Some(idx) = self.manage_account_selected else {
+            return;
+        };
+        let new_idx = if delta < 0 {
+            idx.saturating_sub(delta.unsigned_abs())
+        } else {
+            idx.saturating_add(delta as usize)
+        };
+        if idx >= self.accounts.len() || new_idx >= self.accounts.len() || new_idx == idx {
+            return;
+        }
+        self.accounts.swap(idx, new_idx);
+        self.manage_account_selected = Some(new_idx);
+        save_accounts(&self.accounts);
+    }
+
+    fn refresh_selected_account(&mut self) {
+        let Some(idx) = self.manage_account_selected else {
+            self.status = "Select account first".to_string();
+            return;
+        };
+        if idx >= self.accounts.len() {
+            self.status = "Select account first".to_string();
+            return;
+        }
+        if self.accounts[idx].account_type != AccountType::Licensed {
+            self.status = "Offline account does not need refresh".to_string();
+            return;
+        }
+
+        if let Some(refresh) = self.accounts[idx].refresh_token.clone() {
+            match refresh_microsoft_account(MSA_CLIENT_ID, &refresh) {
+                Ok(refreshed) => {
+                    self.accounts[idx].name = refreshed.username;
+                    self.accounts[idx].uuid = Some(refreshed.uuid);
+                    self.accounts[idx].access_token = Some(refreshed.access_token);
+                    self.accounts[idx].refresh_token = refreshed.refresh_token;
+                    self.accounts[idx].licensed = refreshed.has_minecraft_license;
+                    save_accounts(&self.accounts);
+                    self.status =
+                        format!("Microsoft account refreshed: {}", self.accounts[idx].name);
+                }
+                Err(err) => {
+                    self.accounts[idx].licensed = false;
+                    save_accounts(&self.accounts);
+                    self.status = format!("Account refresh failed, re-login required: {err}");
+                }
+            }
+            return;
+        }
+
+        if let Some(token) = self.accounts[idx].access_token.clone() {
+            match validate_minecraft_account(&token) {
+                Ok(validation) => {
+                    self.accounts[idx].name = validation.username;
+                    self.accounts[idx].uuid = Some(validation.uuid);
+                    self.accounts[idx].licensed = validation.has_minecraft_license;
+                    save_accounts(&self.accounts);
+                    self.status = format!("Account checked: {}", self.accounts[idx].name);
+                }
+                Err(err) => {
+                    self.accounts[idx].licensed = false;
+                    save_accounts(&self.accounts);
+                    self.status = format!("Account token expired, re-login required: {err}");
+                }
+            }
+        } else {
+            self.status = "No token found for selected account".to_string();
+        }
+    }
+
+    fn account_head_cache_path(&self, name: &str) -> PathBuf {
+        let safe = sanitize_key_fragment(name);
+        self.data_root
+            .join("cache")
+            .join("account_heads")
+            .join(format!("{safe}.png"))
+    }
+
+    fn ensure_account_head_cached_async(&mut self, name: &str) -> Option<String> {
+        let key = name.trim().to_string();
+        if key.is_empty() {
+            return None;
+        }
+        let target = self.account_head_cache_path(&key);
+        if target.is_file() {
+            return Some(target.display().to_string());
+        }
+        if self.account_avatar_pending.contains(&key) {
+            return None;
+        }
+        self.account_avatar_pending.insert(key.clone());
+        let tx = self.account_avatar_tx.clone();
+        let urls = minecraft_head_icon_urls(&key);
+        std::thread::spawn(move || {
+            let mut ok = false;
+            for url in urls {
+                if download_file_to_path(&url, &target).is_ok() {
+                    ok = true;
+                    break;
+                }
+            }
+            let _ = if ok {
+                tx.send(AccountAvatarEvent::Ready { key })
+            } else {
+                tx.send(AccountAvatarEvent::Error { key })
+            };
+        });
+        None
+    }
+
+    fn poll_account_avatar_events(&mut self) {
+        loop {
+            let Ok(event) = self.account_avatar_rx.try_recv() else {
+                break;
+            };
+            match event {
+                AccountAvatarEvent::Ready { key } => {
+                    self.account_avatar_pending.remove(&key);
+                }
+                AccountAvatarEvent::Error { key } => {
+                    self.account_avatar_pending.remove(&key);
+                }
+            }
+        }
+    }
+
     fn do_add_licensed_account(&mut self) {
         let name = self.new_account_name.trim();
         let token = self.new_account_token.trim();
@@ -702,13 +1700,18 @@ impl PrismarineApp {
                 } else {
                     name.to_string()
                 };
-                self.accounts.push(Account {
-                    name: account_name.clone(),
-                    active: false,
-                    account_type: AccountType::Licensed,
-                    access_token: Some(token.to_string()),
-                    licensed: validation.has_minecraft_license,
-                });
+            self.accounts.push(Account {
+                name: account_name.clone(),
+                active: true,
+                account_type: AccountType::Licensed,
+                access_token: Some(token.to_string()),
+                refresh_token: None,
+                uuid: Some(validation.uuid),
+                licensed: validation.has_minecraft_license,
+            });
+                if let Some(last) = self.accounts.len().checked_sub(1) {
+                    self.set_active_account(last);
+                }
                 self.status = if validation.has_minecraft_license {
                     format!("Licensed account added: {account_name}")
                 } else {
@@ -728,11 +1731,16 @@ impl PrismarineApp {
     fn apply_licensed_account(&mut self, account: LicensedMicrosoftAccount) {
         self.accounts.push(Account {
             name: account.username.clone(),
-            active: false,
+            active: true,
             account_type: AccountType::Licensed,
             access_token: Some(account.access_token),
+            refresh_token: account.refresh_token,
+            uuid: Some(account.uuid),
             licensed: account.has_minecraft_license,
         });
+        if let Some(last) = self.accounts.len().checked_sub(1) {
+            self.set_active_account(last);
+        }
         self.status = if account.has_minecraft_license {
             format!("Licensed account added: {}", account.username)
         } else {
@@ -759,7 +1767,7 @@ impl PrismarineApp {
                 // Show code/QR in UI immediately, then open browser in a non-blocking way.
                 self.device_login_qr_payload = open_url.clone();
                 self.device_login_status =
-                    "Ожидание подтверждения в браузере/Microsoft...".to_string();
+                    "Waiting for confirmation in browser/Microsoft...".to_string();
                 self.device_login_info = Some(device.clone());
                 let (tx, rx) = mpsc::channel::<DeviceLoginEvent>();
                 let device_copy = device.clone();
@@ -799,7 +1807,7 @@ impl PrismarineApp {
             DeviceLoginEvent::Error(err) => {
                 self.device_login_receiver = None;
                 self.device_login_info = None;
-                self.device_login_status = format!("Ошибка входа: {err}");
+                self.device_login_status = format!("Login error: {err}");
                 self.status = format!("Microsoft login failed: {err}");
             }
         }
@@ -821,16 +1829,7 @@ impl PrismarineApp {
         if !append {
             self.download_search_last_input = query.clone();
         }
-        if query.is_empty() {
-            self.modrinth_hits.clear();
-            self.curseforge_hits.clear();
-            self.selected_modrinth_hit = None;
-            self.selected_curseforge_hit = None;
-            self.download_details = DownloadDetails::default();
-            self.download_search_next_offset = 0;
-            self.download_search_has_more = false;
-            return;
-        }
+        self.download_search_last_dispatched_query = query.clone();
 
         self.download_search_request_id = self.download_search_request_id.wrapping_add(1);
         let request_id = self.download_search_request_id;
@@ -947,6 +1946,17 @@ impl PrismarineApp {
                 self.modrinth_hits.extend(hits);
                 self.download_search_next_offset = self.modrinth_hits.len();
                 self.download_search_has_more = count >= 25;
+                if count == 0
+                    && !append
+                    && !self.download_search_last_dispatched_query.trim().is_empty()
+                {
+                    let keep_query = self.modrinth_query.clone();
+                    self.modrinth_query.clear();
+                    self.start_download_search(false);
+                    self.modrinth_query = keep_query;
+                    self.status = "Modrinth: no results, showing popular projects".to_string();
+                    return;
+                }
                 if self.selected_modrinth_hit.is_none() && !self.modrinth_hits.is_empty() {
                     self.selected_modrinth_hit = Some(0);
                     self.request_selected_download_details();
@@ -971,6 +1981,17 @@ impl PrismarineApp {
                 self.curseforge_hits.extend(hits);
                 self.download_search_next_offset = self.curseforge_hits.len();
                 self.download_search_has_more = count >= 25;
+                if count == 0
+                    && !append
+                    && !self.download_search_last_dispatched_query.trim().is_empty()
+                {
+                    let keep_query = self.curseforge_query.clone();
+                    self.curseforge_query.clear();
+                    self.start_download_search(false);
+                    self.curseforge_query = keep_query;
+                    self.status = "CurseForge: no results, showing popular projects".to_string();
+                    return;
+                }
                 if self.selected_curseforge_hit.is_none() && !self.curseforge_hits.is_empty() {
                     self.selected_curseforge_hit = Some(0);
                     self.request_selected_download_details();
@@ -1040,7 +2061,7 @@ impl PrismarineApp {
             out.push_str("---\n\n");
             out.push_str(&details.body_markdown);
         }
-        out
+        normalize_markdown_html_images(&out)
     }
 
     fn details_markdown_from_curseforge(
@@ -1069,7 +2090,7 @@ impl PrismarineApp {
         if !details.wiki_url.trim().is_empty() {
             out.push_str(&format!("- [Wiki]({})\n", details.wiki_url));
         }
-        out
+        normalize_markdown_html_images(&out)
     }
 
     fn request_selected_download_details(&mut self) {
@@ -1233,6 +2254,16 @@ impl PrismarineApp {
     }
 
     fn queue_modrinth_selected_download(&mut self) {
+        if !matches!(
+            self.download_content_type,
+            DownloadContentType::Mods
+                | DownloadContentType::ResourcePacks
+                | DownloadContentType::ShaderPacks
+        ) {
+            self.status = "Downloads are only available for Mods/Resource Packs/Shader Packs"
+                .to_string();
+            return;
+        }
         let Some(hit_idx) = self.selected_modrinth_hit else {
             self.status = "No Modrinth project selected".to_string();
             return;
@@ -1251,6 +2282,10 @@ impl PrismarineApp {
             loader: match self.download_content_type {
                 DownloadContentType::Mods => self.modrinth_loader.trim().to_string(),
                 DownloadContentType::ResourcePacks => String::new(),
+                DownloadContentType::ShaderPacks => String::new(),
+                DownloadContentType::Worlds
+                | DownloadContentType::Servers
+                | DownloadContentType::Screenshots => String::new(),
             },
         };
         self.queue_download_job(
@@ -1268,6 +2303,16 @@ impl PrismarineApp {
     }
 
     fn queue_curseforge_selected_download(&mut self) {
+        if !matches!(
+            self.download_content_type,
+            DownloadContentType::Mods
+                | DownloadContentType::ResourcePacks
+                | DownloadContentType::ShaderPacks
+        ) {
+            self.status = "Downloads are only available for Mods/Resource Packs/Shader Packs"
+                .to_string();
+            return;
+        }
         let Some(hit_idx) = self.selected_curseforge_hit else {
             self.status = "No CurseForge project selected".to_string();
             return;
@@ -1299,6 +2344,16 @@ impl PrismarineApp {
     }
 
     fn queue_direct_url_download(&mut self) {
+        if !matches!(
+            self.download_content_type,
+            DownloadContentType::Mods
+                | DownloadContentType::ResourcePacks
+                | DownloadContentType::ShaderPacks
+        ) {
+            self.status = "Direct URL download is only available for Mods/Resource Packs/Shader Packs"
+                .to_string();
+            return;
+        }
         let url = self.curseforge_download_url.trim().to_string();
         if url.is_empty() {
             self.status = "CurseForge URL is empty".to_string();
@@ -1317,6 +2372,10 @@ impl PrismarineApp {
                 .unwrap_or(match self.download_content_type {
                     DownloadContentType::Mods => "downloaded-mod.jar",
                     DownloadContentType::ResourcePacks => "downloaded-resourcepack.zip",
+                    DownloadContentType::ShaderPacks => "downloaded-shaderpack.zip",
+                    DownloadContentType::Worlds
+                    | DownloadContentType::Servers
+                    | DownloadContentType::Screenshots => "downloaded-content.bin",
                 })
                 .to_string()
         } else {
@@ -1494,6 +2553,8 @@ impl PrismarineApp {
         }
         if has_completed {
             self.refresh_selected_content();
+            self.download_jobs
+                .retain(|j| j.state != DownloadJobState::Done);
         }
     }
 
@@ -1513,35 +2574,49 @@ impl PrismarineApp {
                     })
                     .count();
                 ui.monospace(format!("active: {active}"));
-                if ui.button("Clear Finished").clicked() {
-                    self.download_jobs.retain(|j| {
-                        j.state != DownloadJobState::Done && j.state != DownloadJobState::Failed
-                    });
-                }
             });
-            let start = self.download_jobs.len().saturating_sub(6);
-            for job in self.download_jobs.iter().skip(start) {
-                ui.horizontal(|ui| {
-                    ui.label(job.title.as_str());
-                    ui.add_space(8.0);
-                    ui.small(job.status.as_str());
+            egui::ScrollArea::vertical()
+                .id_salt("left_download_queue_scroll")
+                .max_height(ui.available_height().max(80.0))
+                .show(ui, |ui| {
+                    let start = self.download_jobs.len().saturating_sub(12);
+                    for job in self.download_jobs.iter().skip(start) {
+                        ui.horizontal(|ui| {
+                            ui.label(job.title.as_str());
+                            ui.add_space(8.0);
+                            ui.small(job.status.as_str());
+                        });
+                        if job.state == DownloadJobState::Downloading
+                            || job.state == DownloadJobState::Resolving
+                        {
+                            let bar = if job.total.is_some() {
+                                job.progress
+                            } else {
+                                0.0
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(bar)
+                                    .show_percentage()
+                                    .desired_width(ui.available_width()),
+                            );
+                        }
+                    }
                 });
-                if job.state == DownloadJobState::Downloading
-                    || job.state == DownloadJobState::Resolving
-                {
-                    let bar = if job.total.is_some() {
-                        job.progress
-                    } else {
-                        0.0
-                    };
-                    ui.add(
-                        egui::ProgressBar::new(bar)
-                            .show_percentage()
-                            .desired_width(ui.available_width()),
-                    );
-                } else if job.state == DownloadJobState::Done {
-                    ui.add(egui::ProgressBar::new(1.0).desired_width(ui.available_width()));
-                }
+            if self
+                .download_jobs
+                .iter()
+                .any(|j| j.state == DownloadJobState::Failed)
+            {
+                ui.horizontal(|ui| {
+                    ui.small("Failed downloads remain in queue.");
+                    if ui.button("Clear Failed").clicked() {
+                        self.download_jobs
+                            .retain(|j| j.state != DownloadJobState::Failed);
+                    }
+                });
+            }
+            if self.download_jobs.is_empty() {
+                ui.small("No downloads in queue");
             }
         });
         ui.add_space(6.0);
@@ -1564,30 +2639,65 @@ impl PrismarineApp {
             self.status = "No instance selected".to_string();
             return;
         };
-        match sync_modrinth_managed_mods(&instance_path) {
-            Ok(changed) => {
-                if changed > 0 {
-                    self.status = format!("Updated {changed} mods from managed Modrinth pack");
+        let game_version = self.detect_instance_version(&instance_path);
+        let loader = self.detect_instance_loader(&instance_path);
+
+        let managed_result = sync_modrinth_managed_mods(&instance_path);
+        let installed_result =
+            update_installed_modrinth_mods(&instance_path, &game_version, &loader);
+
+        match (managed_result, installed_result) {
+            (Ok(managed), Ok(installed)) => {
+                let total = managed + installed;
+                if total > 0 {
+                    self.status = format!(
+                        "Updated {total} mods ({managed} managed + {installed} installed)"
+                    );
                 } else {
-                    self.status = "Managed Modrinth mods are up to date".to_string();
+                    self.status = "All mods are up to date".to_string();
                 }
                 self.refresh_selected_content();
             }
-            Err(err) => {
-                self.status = format!("Mod auto-update failed: {err}");
+            (Err(err), Ok(_)) => {
+                self.status = format!("Managed mod update failed: {err}");
+            }
+            (Ok(_), Err(err)) => {
+                self.status = format!("Installed mod update failed: {err}");
+            }
+            (Err(err1), Err(err2)) => {
+                self.status =
+                    format!("Mod auto-update failed: managed error: {err1}; installed error: {err2}");
             }
         }
     }
 
-    fn do_add_jar_to_mods(&mut self) {
+    fn do_add_content_file(&mut self) {
         let Some(instance_path) = self.selected_instance_path() else {
             self.status = "No instance selected".to_string();
             return;
         };
-        let Some(file_path) = rfd::FileDialog::new()
-            .add_filter("Java archives", &["jar"])
-            .pick_file()
-        else {
+        let content_type = self.download_content_type.clone();
+        if matches!(
+            content_type,
+            DownloadContentType::Worlds
+                | DownloadContentType::Servers
+                | DownloadContentType::Screenshots
+        ) {
+            self.status = "Add Content is available for Mods/Resource Packs/Shader Packs".to_string();
+            return;
+        }
+        let mut dialog = rfd::FileDialog::new();
+        dialog = match content_type {
+            DownloadContentType::Mods => dialog.add_filter("Java archives", &["jar"]),
+            DownloadContentType::ResourcePacks => {
+                dialog.add_filter("Resource packs", &["zip", "jar"])
+            }
+            DownloadContentType::ShaderPacks => dialog.add_filter("Shader packs", &["zip", "jar"]),
+            DownloadContentType::Worlds
+            | DownloadContentType::Servers
+            | DownloadContentType::Screenshots => dialog,
+        };
+        let Some(file_path) = dialog.pick_file() else {
             return;
         };
         let file_name = match file_path.file_name().and_then(|x| x.to_str()) {
@@ -1597,15 +2707,15 @@ impl PrismarineApp {
                 return;
             }
         };
-        let target_dir = preferred_mods_dir(&instance_path);
+        let target_dir = preferred_download_dir(&instance_path, &content_type);
         let target_path = target_dir.join(&file_name);
         match fs::copy(&file_path, &target_path) {
             Ok(_) => {
-                self.status = format!("Added jar: {} -> {}", file_name, target_path.display());
+                self.status = format!("Added content: {} -> {}", file_name, target_path.display());
                 self.refresh_selected_content();
             }
             Err(err) => {
-                self.status = format!("Failed to add jar: {err}");
+                self.status = format!("Failed to add content file: {err}");
             }
         }
     }
@@ -1669,7 +2779,7 @@ impl PrismarineApp {
         }
 
         self.status =
-            "Java not found automatically. Use 'Обзор' to select java binary.".to_string();
+            "Java not found automatically. Use 'Browse' to select java binary.".to_string();
     }
 
     fn do_browse_java(&mut self) {
@@ -1712,6 +2822,7 @@ impl PrismarineApp {
             show_news: self.show_news,
             filter: self.filter.clone(),
             active_tab: self.active_tab.clone(),
+            last_seen_launcher_version: self.last_seen_launcher_version.clone(),
         };
         if let Ok(text) = serde_json::to_string_pretty(&state) {
             let path = state_file_path();
@@ -1785,28 +2896,92 @@ impl PrismarineApp {
         String::new()
     }
 
+    fn detect_instance_loader_version(&self, instance_path: &Path, loader: &str) -> Option<String> {
+        if loader.trim().is_empty() {
+            return None;
+        }
+        let target_uid = match loader {
+            "fabric" => "net.fabricmc.fabric-loader",
+            "quilt" => "org.quiltmc.quilt-loader",
+            "forge" => "net.minecraftforge",
+            "neoforge" => "net.neoforged",
+            _ => return None,
+        };
+        let mmc_pack = instance_path.join("mmc-pack.json");
+        let text = fs::read_to_string(mmc_pack).ok()?;
+        let json = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+        let components = json.get("components")?.as_array()?;
+        for component in components {
+            let uid = component.get("uid").and_then(|v| v.as_str()).unwrap_or("");
+            if uid == target_uid {
+                let version = component.get("version").and_then(|v| v.as_str()).unwrap_or("");
+                let v = version.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+
     fn resolve_instance_icon_path(&self, instance_path: &Path) -> Option<String> {
         let cfg = load_prism_instance_config(instance_path).unwrap_or_default();
-        if let Some(icon_key) = cfg.icon_key {
+        let is_custom_icon = cfg
+            .icon_key
+            .as_ref()
+            .map(|v| {
+                let trimmed = v.trim();
+                !trimmed.is_empty() && trimmed != "default"
+            })
+            .unwrap_or(false);
+
+        if is_custom_icon && let Some(icon_key) = cfg.icon_key {
             let trimmed = icon_key.trim();
-            if !trimmed.is_empty() && trimmed != "default" {
-                for ext in ["png", "jpg", "jpeg", "ico"] {
-                    let file_name = format!("{trimmed}.{ext}");
-                    let candidate = self.data_root.join("icons").join(&file_name);
-                    if candidate.is_file() {
-                        return Some(candidate.display().to_string());
-                    }
-                    let candidate_alt = self.instance_root().join("icons").join(&file_name);
-                    if candidate_alt.is_file() {
-                        return Some(candidate_alt.display().to_string());
-                    }
+            for ext in ["png", "jpg", "jpeg", "ico", "webp", "gif", "svg"] {
+                let file_name = format!("{trimmed}.{ext}");
+                let candidate = self.data_root.join("icons").join(&file_name);
+                if candidate.is_file() {
+                    return Some(candidate.display().to_string());
                 }
+                let candidate_alt = self.instance_root().join("icons").join(&file_name);
+                if candidate_alt.is_file() {
+                    return Some(candidate_alt.display().to_string());
+                }
+            }
+        }
+
+        if !is_custom_icon {
+            let mut root_images: Vec<PathBuf> = match fs::read_dir(instance_path) {
+                Ok(entries) => entries
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file())
+                    .filter(|p| {
+                        p.extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"))
+                            .unwrap_or(false)
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            root_images.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+            if let Some(first) = root_images.first() {
+                return Some(first.display().to_string());
             }
         }
 
         for candidate in [
             instance_path.join("icon.png"),
+            instance_path.join("icon.webp"),
+            instance_path.join("icon.gif"),
+            instance_path.join("icon.svg"),
+            instance_path.join("icon.jpg"),
+            instance_path.join("icon.jpeg"),
             instance_path.join(".minecraft").join("icon.png"),
+            instance_path.join(".minecraft").join("icon.webp"),
+            instance_path.join(".minecraft").join("icon.gif"),
+            instance_path.join(".minecraft").join("icon.svg"),
         ] {
             if candidate.is_file() {
                 return Some(candidate.display().to_string());
@@ -1961,6 +3136,424 @@ impl PrismarineApp {
         None
     }
 
+    fn extract_mod_metadata_from_archive(&self, mod_file: &Path) -> Option<(String, String)> {
+        let file = fs::File::open(mod_file).ok()?;
+        let mut zip = ZipArchive::new(file).ok()?;
+
+        let manifest_version = read_manifest_implementation_version(&mut zip);
+
+        if let Some((name, mut version)) =
+            read_mods_toml_name_version(&mut zip, "META-INF/mods.toml")
+                .or_else(|| read_mods_toml_name_version(&mut zip, "META-INF/neoforge.mods.toml"))
+        {
+            if version == "${file.jarVersion}" {
+                version = manifest_version.unwrap_or_else(|| "NONE".to_string());
+            }
+            return Some((name, version));
+        }
+
+        if let Some((name, version)) = read_mcmod_info_name_version(&mut zip) {
+            return Some((name, version));
+        }
+        if let Some((name, version)) = read_quilt_mod_name_version(&mut zip) {
+            return Some((name, version));
+        }
+        if let Some((name, version)) = read_fabric_mod_name_version(&mut zip) {
+            return Some((name, version));
+        }
+        if let Some((name, version)) = read_forgeversion_properties_name_version(&mut zip) {
+            return Some((name, version));
+        }
+        if let Some((name, version)) = read_litemod_name_version(&mut zip) {
+            return Some((name, version));
+        }
+        None
+    }
+
+    fn resolve_content_icon_path(&self, content_file: &Path) -> Option<String> {
+        if !content_file.is_file() {
+            return None;
+        }
+        let stem = content_file.file_stem()?.to_str()?.to_string();
+        let file_name = content_file.file_name()?.to_str()?.to_string();
+        let parent = content_file.parent()?;
+        for candidate in [
+            parent.join(format!("{stem}.png")),
+            parent.join(format!("{stem}.webp")),
+            parent.join(format!("{stem}.gif")),
+            parent.join(format!("{stem}.jpg")),
+            parent.join(format!("{stem}.jpeg")),
+            parent.join(format!("{file_name}.png")),
+            parent.join(format!("{file_name}.webp")),
+            parent.join(format!("{file_name}.gif")),
+            parent.join(format!("{file_name}.jpg")),
+            parent.join(format!("{file_name}.jpeg")),
+        ] {
+            if candidate.is_file() {
+                return Some(candidate.display().to_string());
+            }
+        }
+        self.extract_content_icon_from_archive(content_file)
+    }
+
+    fn extract_content_icon_from_archive(&self, content_file: &Path) -> Option<String> {
+        let ext = content_file
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if ext != "zip" && ext != "jar" {
+            return None;
+        }
+        let file = fs::File::open(content_file).ok()?;
+        let mut zip = ZipArchive::new(file).ok()?;
+        let mut icon_candidates = vec![
+            "pack.png".to_string(),
+            "icon.png".to_string(),
+            "preview.png".to_string(),
+        ];
+        if let Ok(mut mcmeta) = zip.by_name("pack.mcmeta") {
+            let mut text = String::new();
+            if mcmeta.read_to_string(&mut text).is_ok()
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+                && let Some(icon) = json
+                    .get("pack")
+                    .and_then(|v| v.get("icon"))
+                    .and_then(|v| v.as_str())
+            {
+                icon_candidates.insert(0, icon.to_string());
+            }
+        }
+        for icon_path in icon_candidates {
+            let mut entry = match zip.by_name(&icon_path) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let mut bytes = Vec::new();
+            if entry.read_to_end(&mut bytes).is_err() || bytes.is_empty() {
+                continue;
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            content_file.display().to_string().hash(&mut hasher);
+            icon_path.hash(&mut hasher);
+            if let Ok(meta) = fs::metadata(content_file)
+                && let Ok(modified) = meta.modified()
+                && let Ok(delta) = modified.duration_since(std::time::UNIX_EPOCH)
+            {
+                delta.as_nanos().hash(&mut hasher);
+            }
+            let cache_dir = self.data_root.join("cache").join("content_icons");
+            let _ = fs::create_dir_all(&cache_dir);
+            let target = cache_dir.join(format!("{:016x}.png", hasher.finish()));
+            if !target.is_file() {
+                let _ = fs::write(&target, &bytes);
+            }
+            if target.is_file() {
+                return Some(target.display().to_string());
+            }
+        }
+        None
+    }
+
+    fn extract_content_metadata_from_archive(
+        &self,
+        content_file: &Path,
+        content_type: DownloadContentType,
+    ) -> Option<(String, String)> {
+        let ext = content_file
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if ext != "zip" && ext != "jar" {
+            return None;
+        }
+        let file = fs::File::open(content_file).ok()?;
+        let mut zip = ZipArchive::new(file).ok()?;
+
+        if let Ok(mut pack) = zip.by_name("pack.mcmeta") {
+            let mut text = String::new();
+            if pack.read_to_string(&mut text).is_ok()
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+                && let Some(pack_obj) = json.get("pack")
+            {
+                let name = pack_obj
+                    .get("description")
+                    .map(json_text_compact)
+                    .filter(|x| !x.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        prettify_mod_name(
+                            content_file
+                                .file_stem()
+                                .and_then(|x| x.to_str())
+                                .unwrap_or("content"),
+                        )
+                    });
+                let version = pack_obj
+                    .get("pack_format")
+                    .and_then(|v| v.as_i64())
+                    .map(|x| format!("pack format {x}"))
+                    .unwrap_or_else(|| "unknown".to_string());
+                return Some((name, version));
+            }
+        }
+
+        if content_type == DownloadContentType::ShaderPacks
+            && let Ok(mut props) = zip.by_name("shaders/shaders.properties")
+        {
+            let mut text = String::new();
+            if props.read_to_string(&mut text).is_ok() {
+                for line in text.lines() {
+                    let line = line.trim();
+                    if line.starts_with('#') || line.is_empty() {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=')
+                        && key.trim().eq_ignore_ascii_case("version")
+                    {
+                        let v = value.trim();
+                        if !v.is_empty() {
+                            let name = prettify_mod_name(
+                                content_file
+                                    .file_stem()
+                                    .and_then(|x| x.to_str())
+                                    .unwrap_or("shader pack"),
+                            );
+                            return Some((name, v.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn build_content_cache(
+        &self,
+        dir: &Path,
+        content_type: DownloadContentType,
+    ) -> Vec<ContentListEntry> {
+        let mut by_clean_name: HashMap<String, PathBuf> = HashMap::new();
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|x| x.to_str()) {
+                Some(v) => v.to_string(),
+                None => continue,
+            };
+            let clean = name.strip_suffix(".disabled").unwrap_or(&name).to_string();
+            match by_clean_name.get(&clean) {
+                Some(existing) => {
+                    let existing_enabled = !existing
+                        .file_name()
+                        .and_then(|x| x.to_str())
+                        .unwrap_or_default()
+                        .ends_with(".disabled");
+                    let current_enabled = !name.ends_with(".disabled");
+                    if current_enabled && !existing_enabled {
+                        by_clean_name.insert(clean, path);
+                    }
+                }
+                None => {
+                    by_clean_name.insert(clean, path);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        for (clean_name, path) in by_clean_name {
+            let file_name = path
+                .file_name()
+                .and_then(|x| x.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let enabled = !file_name.ends_with(".disabled");
+            let parsed_meta = self.extract_content_metadata_from_archive(&path, content_type.clone());
+            let display_name = parsed_meta
+                .as_ref()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_else(|| prettify_mod_name(&clean_name));
+            let version = parsed_meta
+                .as_ref()
+                .map(|(_, v)| v.trim().to_string())
+                .filter(|v| !v.is_empty() && v != "unknown")
+                .unwrap_or_else(|| extract_version_from_mod_filename(&clean_name));
+            let updated_at = fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(format_system_time_ddmmyyyy)
+                .unwrap_or_default();
+            out.push(ContentListEntry {
+                name: clean_name,
+                file_path: path.display().to_string(),
+                enabled,
+                display_name,
+                version,
+                updated_at,
+                provider: "Local".to_string(),
+                icon_path: self.resolve_content_icon_path(&path),
+            });
+        }
+        out.sort_by(|a, b| {
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
+        });
+        out
+    }
+
+    fn build_worlds_cache(&self, dir: &Path) -> Vec<ContentListEntry> {
+        let mut out = Vec::new();
+        let Ok(entries) = fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|x| x.to_str()) {
+                Some(v) => v.to_string(),
+                None => continue,
+            };
+            let updated_at = fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(format_system_time_ddmmyyyy)
+                .unwrap_or_default();
+            out.push(ContentListEntry {
+                name: name.clone(),
+                file_path: path.display().to_string(),
+                enabled: true,
+                display_name: name,
+                version: String::new(),
+                updated_at,
+                provider: "Local".to_string(),
+                icon_path: Some(
+                    "https://minecraft.wiki/images/Grass_Block_JE7_BE6.png?2bd37?download"
+                        .to_string(),
+                ),
+            });
+        }
+        out.sort_by(|a, b| {
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
+        });
+        out
+    }
+
+    fn build_screenshots_cache(&self, dir: &Path) -> Vec<ContentListEntry> {
+        let mut out = Vec::new();
+        let Ok(entries) = fs::read_dir(dir) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif") {
+                continue;
+            }
+            let name = match path.file_name().and_then(|x| x.to_str()) {
+                Some(v) => v.to_string(),
+                None => continue,
+            };
+            let updated_at = fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(format_system_time_ddmmyyyy)
+                .unwrap_or_default();
+            out.push(ContentListEntry {
+                name: name.clone(),
+                file_path: path.display().to_string(),
+                enabled: true,
+                display_name: name,
+                version: String::new(),
+                updated_at,
+                provider: "Local".to_string(),
+                icon_path: Some(path.display().to_string()),
+            });
+        }
+        out.sort_by(|a, b| {
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
+        });
+        out
+    }
+
+    fn build_servers_cache(&self, instance_path: &Path) -> Vec<ContentListEntry> {
+        let mut out = Vec::new();
+        for candidate in [
+            instance_path.join("minecraft").join("servers.dat"),
+            instance_path.join(".minecraft").join("servers.dat"),
+            instance_path.join("servers.dat"),
+        ] {
+            if !candidate.is_file() {
+                continue;
+            }
+            let updated_at = fs::metadata(&candidate)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(format_system_time_ddmmyyyy)
+                .unwrap_or_default();
+            out.push(ContentListEntry {
+                name: "servers.dat".to_string(),
+                file_path: candidate.display().to_string(),
+                enabled: true,
+                display_name: "servers.dat".to_string(),
+                version: String::new(),
+                updated_at,
+                provider: "Local".to_string(),
+                icon_path: Some(
+                    "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download"
+                        .to_string(),
+                ),
+            });
+            break;
+        }
+        out
+    }
+
+    fn copy_image_file_to_clipboard(&mut self, image_path: &str) {
+        let path = PathBuf::from(image_path);
+        let Ok(bytes) = fs::read(&path) else {
+            self.status = format!("Failed to read screenshot: {}", path.display());
+            return;
+        };
+        let Ok(image) = image::load_from_memory(&bytes) else {
+            self.status = format!("Failed to decode image: {}", path.display());
+            return;
+        };
+        let rgba = image.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        let image_data = arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+        };
+        match Clipboard::new().and_then(|mut cb| cb.set_image(image_data)) {
+            Ok(_) => {
+                self.status = format!("Copied screenshot to clipboard: {}", path.display());
+            }
+            Err(err) => {
+                self.status = format!("Clipboard copy failed: {err}");
+            }
+        }
+    }
+
     fn read_modrinth_managed_metadata(
         &mut self,
         instance_path: &Path,
@@ -2026,35 +3619,143 @@ impl PrismarineApp {
             self.status = "Invalid mod file name".to_string();
             return;
         };
-        let to_name = if enable {
-            name.strip_suffix(".disabled").unwrap_or(name).to_string()
-        } else if name.ends_with(".disabled") {
-            name.to_string()
-        } else {
-            format!("{name}.disabled")
-        };
-        if to_name == name {
-            return;
+        let clean_name = name.strip_suffix(".disabled").unwrap_or(name).to_string();
+        let selected_instance_path = self.selected_instance_path();
+        let mod_dirs = selected_instance_path
+            .as_ref()
+            .map(|p| all_existing_mod_dirs(p))
+            .unwrap_or_default();
+
+        let mut changed = 0usize;
+        let mut errors = Vec::new();
+
+        // Apply toggle to every matching copy across known mod directories.
+        // This avoids "duplicate" entries where one copy is enabled and another is disabled.
+        for dir in &mod_dirs {
+            let enabled_path = dir.join(&clean_name);
+            let disabled_path = dir.join(format!("{clean_name}.disabled"));
+            if enable {
+                if disabled_path.is_file() {
+                    if enabled_path.is_file() {
+                        if let Err(err) = fs::remove_file(&disabled_path) {
+                            errors.push(format!("{}: {err}", disabled_path.display()));
+                        } else {
+                            changed += 1;
+                        }
+                    } else if let Err(err) = fs::rename(&disabled_path, &enabled_path) {
+                        errors.push(format!(
+                            "{} -> {}: {err}",
+                            disabled_path.display(),
+                            enabled_path.display()
+                        ));
+                    } else {
+                        changed += 1;
+                    }
+                }
+            } else if enabled_path.is_file() {
+                if disabled_path.is_file() {
+                    if let Err(err) = fs::remove_file(&enabled_path) {
+                        errors.push(format!("{}: {err}", enabled_path.display()));
+                    } else {
+                        changed += 1;
+                    }
+                } else if let Err(err) = fs::rename(&enabled_path, &disabled_path) {
+                    errors.push(format!(
+                        "{} -> {}: {err}",
+                        enabled_path.display(),
+                        disabled_path.display()
+                    ));
+                } else {
+                    changed += 1;
+                }
+            }
         }
-        let Some(parent) = from.parent() else {
-            self.status = "Invalid mod file path".to_string();
+
+        // Fallback: if the selected instance is unknown or nothing matched, toggle direct file.
+        if changed == 0 {
+            let to_name = if enable {
+                name.strip_suffix(".disabled").unwrap_or(name).to_string()
+            } else if name.ends_with(".disabled") {
+                name.to_string()
+            } else {
+                format!("{name}.disabled")
+            };
+            if to_name != name {
+                if let Some(parent) = from.parent() {
+                    let to = parent.join(to_name);
+                    match fs::rename(&from, &to) {
+                        Ok(_) => changed += 1,
+                        Err(err) => errors.push(format!("{} -> {}: {err}", from.display(), to.display())),
+                    }
+                } else {
+                    errors.push("Invalid mod file path".to_string());
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            self.status = format!("Failed to update mod state: {}", errors.join(" | "));
+        } else if changed > 0 {
+            self.status = format!("Updated mod state for {clean_name}");
+            self.refresh_selected_content();
+        } else {
+            self.status = format!("No matching files found for {clean_name}");
+        }
+    }
+
+    fn do_toggle_content_enabled(&mut self, file_path: &str, enable: bool) {
+        let from = PathBuf::from(file_path);
+        let Some(name) = from.file_name().and_then(|x| x.to_str()) else {
+            self.status = "Invalid content file name".to_string();
             return;
         };
-        let to = parent.join(to_name);
-        match fs::rename(&from, &to) {
+        let clean_name = name.strip_suffix(".disabled").unwrap_or(name).to_string();
+        let Some(parent) = from.parent() else {
+            self.status = "Invalid content file path".to_string();
+            return;
+        };
+        let enabled_path = parent.join(&clean_name);
+        let disabled_path = parent.join(format!("{clean_name}.disabled"));
+
+        let result = if enable {
+            if disabled_path.is_file() {
+                if enabled_path.is_file() {
+                    fs::remove_file(&disabled_path)
+                } else {
+                    fs::rename(&disabled_path, &enabled_path)
+                }
+            } else {
+                Ok(())
+            }
+        } else if enabled_path.is_file() {
+            if disabled_path.is_file() {
+                fs::remove_file(&enabled_path)
+            } else {
+                fs::rename(&enabled_path, &disabled_path)
+            }
+        } else {
+            Ok(())
+        };
+
+        match result {
             Ok(_) => {
-                self.status = format!("Updated mod state: {}", to.display());
+                self.status = format!("Updated content state for {clean_name}");
                 self.refresh_selected_content();
             }
             Err(err) => {
-                self.status = format!("Failed to update mod state: {err}");
+                self.status = format!("Failed to update content state: {err}");
             }
         }
     }
 
     fn do_delete_mod_file(&mut self, file_path: &str) {
         let path = PathBuf::from(file_path);
-        match fs::remove_file(&path) {
+        let result = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        match result {
             Ok(_) => {
                 self.status = format!("Deleted mod: {}", path.display());
                 self.refresh_selected_content();
@@ -2072,17 +3773,29 @@ impl PrismarineApp {
                 self.instances = items
                     .into_iter()
                     .map(|item| {
+                        let cfg = load_prism_instance_config(&item.path).unwrap_or_default();
                         let version = self.detect_instance_version(&item.path);
+                        let loader = {
+                            let detected = self.detect_instance_loader(&item.path);
+                            if detected.trim().is_empty() {
+                                "vanilla".to_string()
+                            } else {
+                                detected
+                            }
+                        };
                         let icon_path = self.resolve_instance_icon_path(&item.path);
                         Instance {
                             name: item.name,
                             version,
+                            loader,
                             running: false,
                             path: item.path.display().to_string(),
                             icon_path,
+                            group: cfg.group.unwrap_or_default(),
                         }
                     })
                     .collect();
+                self.sync_groups_with_instances();
                 if self.instances.is_empty() {
                     self.status =
                         format!("No instances found in {}", self.instance_root().display());
@@ -2106,6 +3819,11 @@ impl PrismarineApp {
 
     fn refresh_selected_content(&mut self) {
         self.mods_cache.clear();
+        self.resourcepacks_cache.clear();
+        self.shaderpacks_cache.clear();
+        self.worlds_cache.clear();
+        self.servers_cache.clear();
+        self.screenshots_cache.clear();
         self.logs_cache.clear();
         self.selected_log = None;
         self.log_preview.clear();
@@ -2119,7 +3837,25 @@ impl PrismarineApp {
         match list_mod_files(&path) {
             Ok(mods) => {
                 let managed = self.read_modrinth_managed_metadata(&path);
-                self.mods_cache = mods
+                let mut by_clean_name: HashMap<String, String> = HashMap::new();
+                for name in mods {
+                    let clean = name.strip_suffix(".disabled").unwrap_or(&name).to_string();
+                    match by_clean_name.get(&clean) {
+                        Some(existing) => {
+                            let existing_enabled = !existing.ends_with(".disabled");
+                            let current_enabled = !name.ends_with(".disabled");
+                            if current_enabled && !existing_enabled {
+                                by_clean_name.insert(clean, name);
+                            }
+                        }
+                        None => {
+                            by_clean_name.insert(clean, name);
+                        }
+                    }
+                }
+                let mut merged_mods: Vec<String> = by_clean_name.into_values().collect();
+                merged_mods.sort();
+                self.mods_cache = merged_mods
                     .into_iter()
                     .map(|name| {
                         let file_path = resolve_mod_file_path(&path, &name)
@@ -2133,22 +3869,41 @@ impl PrismarineApp {
                         let enabled = !name.ends_with(".disabled");
                         let clean_name =
                             name.strip_suffix(".disabled").unwrap_or(&name).to_string();
+                        let parsed_meta = resolve_mod_file_path(&path, &name)
+                            .and_then(|p| self.extract_mod_metadata_from_archive(&p));
                         let (display_name, icon_path, provider) =
                             if let Some((title, icon)) = managed.get(&clean_name) {
                                 (
-                                    title.clone(),
+                                    parsed_meta
+                                        .as_ref()
+                                        .map(|(n, _)| n.clone())
+                                        .or_else(|| {
+                                            if title.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(title.clone())
+                                            }
+                                        })
+                                        .unwrap_or_else(|| prettify_mod_name(&clean_name)),
                                     icon.clone()
                                         .or_else(|| self.resolve_mod_icon_path(&path, &name)),
                                     "Modrinth".to_string(),
                                 )
                             } else {
                                 (
-                                    prettify_mod_name(&clean_name),
+                                    parsed_meta
+                                        .as_ref()
+                                        .map(|(n, _)| n.clone())
+                                        .unwrap_or_else(|| prettify_mod_name(&clean_name)),
                                     self.resolve_mod_icon_path(&path, &name),
                                     "Local".to_string(),
                                 )
                             };
-                        let version = extract_version_from_mod_filename(&clean_name);
+                        let version = parsed_meta
+                            .as_ref()
+                            .map(|(_, v)| v.trim().to_string())
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or_else(|| extract_version_from_mod_filename(&clean_name));
                         let updated_at = fs::metadata(&file_path)
                             .ok()
                             .and_then(|m| m.modified().ok())
@@ -2176,6 +3931,18 @@ impl PrismarineApp {
                 self.status = format!("Failed to load mods: {err}");
             }
         }
+
+        let resourcepacks_dir = preferred_resourcepacks_dir(&path);
+        self.resourcepacks_cache =
+            self.build_content_cache(&resourcepacks_dir, DownloadContentType::ResourcePacks);
+        let shaderpacks_dir = preferred_shaderpacks_dir(&path);
+        self.shaderpacks_cache =
+            self.build_content_cache(&shaderpacks_dir, DownloadContentType::ShaderPacks);
+        let worlds_dir = preferred_worlds_dir(&path);
+        self.worlds_cache = self.build_worlds_cache(&worlds_dir);
+        let screenshots_dir = preferred_screenshots_dir(&path);
+        self.screenshots_cache = self.build_screenshots_cache(&screenshots_dir);
+        self.servers_cache = self.build_servers_cache(&path);
 
         match list_logs(&path) {
             Ok(logs) => {
@@ -2223,6 +3990,22 @@ impl PrismarineApp {
     }
 
     fn sync_process_states(&mut self) {
+        let stale_external: Vec<String> = self
+            .running_process_pids
+            .iter()
+            .filter_map(|(path, pid)| {
+                if self.processes.contains_key(path) || Self::is_pid_alive_for_instance(path, *pid)
+                {
+                    None
+                } else {
+                    Some(path.clone())
+                }
+            })
+            .collect();
+        for path in stale_external {
+            self.running_process_pids.remove(&path);
+        }
+
         let keys: Vec<String> = self.processes.keys().cloned().collect();
         let mut finished: Vec<(String, Option<i32>)> = Vec::new();
         for key in keys {
@@ -2236,6 +4019,8 @@ impl PrismarineApp {
         }
         for (key, exit_code) in finished {
             self.processes.remove(&key);
+            self.running_process_pids.remove(&key);
+            self.last_stopped_instance_path = Some(key.clone());
             if let Some(post) = self.post_exit_commands.remove(&key) {
                 let _ = Command::new("sh")
                     .arg("-lc")
@@ -2250,7 +4035,7 @@ impl PrismarineApp {
                 .map(|i| i.name.clone())
                 .unwrap_or_else(|| key.clone());
             match exit_code {
-                Some(code) if code == 0 => {
+                Some(0) => {
                     self.status = format!("{name} stopped");
                     self.append_launcher_log(&key, "[Launcher] Process exited with code 0");
                 }
@@ -2260,6 +4045,12 @@ impl PrismarineApp {
                         &key,
                         &format!("[Launcher] Process crashed with code {code}"),
                     );
+                    self.make_launch_toast_for_path(
+                        &key,
+                        "Minecraft failed to launch",
+                        name.clone(),
+                        true,
+                    );
                 }
                 None => {
                     self.status = format!("{name} stopped");
@@ -2267,13 +4058,16 @@ impl PrismarineApp {
                 }
             }
         }
+        self.persist_running_processes();
         for instance in &mut self.instances {
-            instance.running = self.processes.contains_key(&instance.path);
+            instance.running = self.processes.contains_key(&instance.path)
+                || self.running_process_pids.contains_key(&instance.path);
         }
     }
 
     fn do_create_instance(&mut self) {
         let name = self.create_name.trim().to_string();
+        let group = self.create_group.trim().to_string();
         let game_version = self.create_game_version.trim().to_string();
         let loader = self.create_loader.clone();
         if name.is_empty() {
@@ -2290,10 +4084,13 @@ impl PrismarineApp {
                     .as_ref()
                     .map(CreateLoader::cfg_value)
                     .unwrap_or("vanilla");
-                let cfg_text = format!(
+                let mut cfg_text = format!(
                     "# PrismarineLauncher instance\nIntendedVersion={}\nManagedLoader={}\n",
                     game_version, managed_loader
                 );
+                if !group.is_empty() {
+                    cfg_text.push_str(&format!("Group={group}\n"));
+                }
                 if let Err(err) = fs::write(created.path.join("instance.cfg"), cfg_text) {
                     self.status =
                         format!("Created instance {name}, but failed to write cfg: {err}");
@@ -2343,6 +4140,7 @@ impl PrismarineApp {
                 );
                 self.show_create_dialog = false;
                 self.create_name.clear();
+                self.create_group.clear();
                 self.create_game_version.clear();
                 self.create_loader = None;
                 self.reload_instances();
@@ -2367,7 +4165,13 @@ impl PrismarineApp {
     }
 
     fn do_import_instance(&mut self) {
+        if self.import_worker_rx.is_some() {
+            self.status = "Import already in progress".to_string();
+            return;
+        }
+
         let archive_path = PathBuf::from(self.create_import_path.trim());
+        let group = self.create_group.trim().to_string();
         if self.create_name.trim().is_empty() {
             self.status = "Instance name must not be empty".to_string();
             return;
@@ -2386,68 +4190,159 @@ impl PrismarineApp {
 
         match create_instance(&self.instance_root(), &instance_name) {
             Ok(created) => {
-                let result = if lower == "mrpack" {
-                    import_mrpack_archive(&archive_path, &created.path)
-                } else {
-                    import_zip_archive(&archive_path, &created.path)
-                };
-                match result {
-                    Ok(summary) => {
-                        if !summary.game_version.is_empty() {
-                            let loader = summary
-                                .loader
-                                .as_ref()
-                                .map_or("custom".to_string(), |x| x.cfg_value().to_string());
-                            let cfg_text = format!(
-                                "# PrismarineLauncher instance\nIntendedVersion={}\nManagedLoader={}\n",
-                                summary.game_version, loader
-                            );
-                            let _ = fs::write(created.path.join("instance.cfg"), cfg_text);
+                let (tx, rx) = mpsc::channel::<ImportWorkerEvent>();
+                self.import_worker_rx = Some(rx);
+                self.import_progress = Some(ImportUiProgress {
+                    stage: "import".to_string(),
+                    done: 0,
+                    total: 1,
+                    message: "Preparing import...".to_string(),
+                });
+                self.status = format!("Importing instance {}...", instance_name);
 
-                            let mut components = vec![
-                                serde_json::json!({"uid":"net.minecraft","version":summary.game_version}),
-                            ];
-                            if let Some(loader) = summary.loader {
-                                components.push(
-                                    serde_json::json!({"uid":loader.mmc_uid(),"version":"0.0.0"}),
-                                );
-                            }
-                            let mmc_pack = serde_json::json!({
-                                "formatVersion": 1,
-                                "components": components
+                let instance_path = created.path.clone();
+                let instance_name_for_thread = instance_name.clone();
+                let group_for_thread = group.clone();
+                std::thread::spawn(move || {
+                    let send_progress = |done: usize, total: usize, message: String| {
+                        let _ = tx.send(ImportWorkerEvent::Progress {
+                            stage: "import".to_string(),
+                            done,
+                            total,
+                            message,
+                        });
+                    };
+
+                    let result = if lower == "mrpack" {
+                        import_mrpack_archive_with_progress(
+                            &archive_path,
+                            &instance_path,
+                            send_progress,
+                        )
+                    } else {
+                        import_zip_archive_with_progress(
+                            &archive_path,
+                            &instance_path,
+                            send_progress,
+                        )
+                    };
+                    match result {
+                        Ok(summary) => {
+                            let _ = tx.send(ImportWorkerEvent::Finished {
+                                instance_name: instance_name_for_thread,
+                                instance_path,
+                                group: group_for_thread,
+                                summary,
                             });
-                            let _ = fs::write(
-                                created.path.join("mmc-pack.json"),
-                                serde_json::to_string_pretty(&mmc_pack)
-                                    .unwrap_or_else(|_| "{}".to_string()),
-                            );
-
-                            let mut profile = default_launch_profile(&created.path);
-                            upsert_arg_pair(
-                                &mut profile.game_args,
-                                "--version",
-                                summary.game_version.as_str(),
-                            );
-                            let _ = save_launch_profile(&created.path, &profile);
                         }
-
-                        self.status = format!("Imported instance {}", instance_name);
-                        self.show_create_dialog = false;
-                        self.create_name.clear();
-                        self.create_game_version.clear();
-                        self.create_loader = None;
-                        self.create_import_path.clear();
-                        self.reload_instances();
+                        Err(err) => {
+                            let _ = delete_instance(&instance_path);
+                            let _ = tx.send(ImportWorkerEvent::Error {
+                                message: format!("Failed to import archive: {err}"),
+                            });
+                        }
                     }
-                    Err(err) => {
-                        let _ = delete_instance(&created.path);
-                        self.status = format!("Failed to import archive: {err}");
-                    }
-                }
+                });
             }
             Err(err) => {
                 self.status = format!("Failed to create instance folder: {err}");
             }
+        }
+    }
+
+    fn poll_import_worker_events(&mut self) {
+        let mut clear_receiver = false;
+        let mut events = Vec::new();
+        if let Some(rx) = &self.import_worker_rx {
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+        }
+
+        for event in events {
+            match event {
+                ImportWorkerEvent::Progress {
+                    stage,
+                    done,
+                    total,
+                    message,
+                } => {
+                    self.import_progress = Some(ImportUiProgress {
+                        stage,
+                        done,
+                        total,
+                        message: message.clone(),
+                    });
+                    self.status = message;
+                }
+                ImportWorkerEvent::Finished {
+                    instance_name,
+                    instance_path,
+                    group,
+                    summary,
+                } => {
+                    if !summary.game_version.is_empty() {
+                        let loader = summary
+                            .loader
+                            .as_ref()
+                            .map_or("custom".to_string(), |x| x.cfg_value().to_string());
+                        let cfg_text = format!(
+                            "# PrismarineLauncher instance\nIntendedVersion={}\nManagedLoader={}\n",
+                            summary.game_version, loader
+                        );
+                        let _ = fs::write(instance_path.join("instance.cfg"), cfg_text);
+                        if !group.is_empty() {
+                            let _ = set_instance_cfg_value(&instance_path, "Group", Some(&group));
+                        }
+
+                        let mut components = vec![
+                            serde_json::json!({"uid":"net.minecraft","version":summary.game_version}),
+                        ];
+                        if let Some(loader) = summary.loader {
+                            components.push(
+                                serde_json::json!({"uid":loader.mmc_uid(),"version":"0.0.0"}),
+                            );
+                        }
+                        let mmc_pack = serde_json::json!({
+                            "formatVersion": 1,
+                            "components": components
+                        });
+                        let _ = fs::write(
+                            instance_path.join("mmc-pack.json"),
+                            serde_json::to_string_pretty(&mmc_pack)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        );
+
+                        let mut profile = default_launch_profile(&instance_path);
+                        upsert_arg_pair(
+                            &mut profile.game_args,
+                            "--version",
+                            summary.game_version.as_str(),
+                        );
+                        let _ = save_launch_profile(&instance_path, &profile);
+                    }
+
+                    self.status = format!("Imported instance {}", instance_name);
+                    self.import_progress = None;
+                    self.show_create_dialog = false;
+                    self.create_name.clear();
+                    self.create_group.clear();
+                    self.create_game_version.clear();
+                    self.create_loader = None;
+                    self.create_import_path.clear();
+                    self.reload_instances();
+                    clear_receiver = true;
+                }
+                ImportWorkerEvent::Error { message } => {
+                    self.import_progress = None;
+                    self.status = message;
+                    clear_receiver = true;
+                }
+            }
+        }
+
+        if clear_receiver {
+            self.import_worker_rx = None;
         }
     }
 
@@ -2515,6 +4410,8 @@ impl PrismarineApp {
 
         match delete_instance(Path::new(&instance.path)) {
             Ok(_) => {
+                self.running_process_pids.remove(&instance.path);
+                self.persist_running_processes();
                 self.status = format!("Deleted {}", instance.name);
                 self.show_delete_dialog = false;
                 self.reload_instances();
@@ -2530,7 +4427,9 @@ impl PrismarineApp {
             self.status = "No instance selected".to_string();
             return;
         };
-        if self.processes.contains_key(&instance.path) {
+        if self.processes.contains_key(&instance.path)
+            || self.running_pid_for_instance(&instance.path).is_some()
+        {
             self.status = format!("{} is already running", instance.name);
             return;
         }
@@ -2542,7 +4441,11 @@ impl PrismarineApp {
         let instance_path = PathBuf::from(&instance.path);
         let prism_cfg = load_prism_instance_config(&instance_path).unwrap_or_default();
         let mut profile = self.launch_profile.clone();
-        profile.java_path = self.global_settings.java_path.clone();
+        profile.java_path = if self.global_settings.java_path.trim().is_empty() {
+            "java".to_string()
+        } else {
+            self.global_settings.java_path.clone()
+        };
         match self.global_settings.mode {
             LaunchSettingsMode::Basic => {
                 let min_mb = self.global_settings.min_memory_mb.max(256);
@@ -2595,6 +4498,7 @@ impl PrismarineApp {
         {
             profile.java_path = java;
         }
+        upsert_jvm_system_property(&mut profile.jvm_args, "user.language", "en");
         if profile.working_dir.trim().is_empty() {
             profile.working_dir = instance.path.clone();
         }
@@ -2630,9 +4534,9 @@ impl PrismarineApp {
         };
         let instance_version = self.detect_instance_version(&instance_path);
         let instance_loader = self.detect_instance_loader(&instance_path);
-        let should_prepare_runtime = instance_version != "unknown"
-            && instance_loader.is_empty()
-            && profile.classpath.is_empty();
+        let instance_loader_version =
+            self.detect_instance_loader_version(&instance_path, &instance_loader);
+        let should_prepare_runtime = instance_version != "unknown" && profile.classpath.is_empty();
 
         self.pending_launches.insert(
             instance.path.clone(),
@@ -2644,6 +4548,12 @@ impl PrismarineApp {
             },
         );
         self.launch_in_progress.insert(instance.path.clone());
+        self.make_launch_toast_for_instance(
+            &instance,
+            "Minecraft is launching...",
+            instance.name.clone(),
+            false,
+        );
         self.status = format!("Preparing launch for {}...", instance.name);
         self.append_launcher_log(
             &instance.path,
@@ -2674,18 +4584,35 @@ impl PrismarineApp {
                         instance_version
                     ),
                 });
-                if let Err(err) = ensure_minecraft_runtime_with_progress(
-                    &data_root,
-                    &instance_path_copy,
-                    &instance_version,
-                    &mut profile,
-                    |progress| {
-                        let _ = tx.send(LaunchWorkerEvent::Progress {
-                            instance_path: instance_key.clone(),
-                            progress,
-                        });
-                    },
-                ) {
+                let runtime_result = if instance_loader == "fabric" {
+                    ensure_fabric_runtime_with_progress(
+                        &data_root,
+                        &instance_path_copy,
+                        &instance_version,
+                        instance_loader_version.as_deref(),
+                        &mut profile,
+                        |progress| {
+                            let _ = tx.send(LaunchWorkerEvent::Progress {
+                                instance_path: instance_key.clone(),
+                                progress,
+                            });
+                        },
+                    )
+                } else {
+                    ensure_minecraft_runtime_with_progress(
+                        &data_root,
+                        &instance_path_copy,
+                        &instance_version,
+                        &mut profile,
+                        |progress| {
+                            let _ = tx.send(LaunchWorkerEvent::Progress {
+                                instance_path: instance_key.clone(),
+                                progress,
+                            });
+                        },
+                    )
+                };
+                if let Err(err) = runtime_result {
                     let _ = tx.send(LaunchWorkerEvent::Error {
                         instance_path: instance_key,
                         message: format!("Failed to prepare Minecraft runtime: {err}"),
@@ -2728,6 +4655,12 @@ impl PrismarineApp {
                         &format!("[Launcher] ERROR: {message}"),
                     );
                     self.status = message;
+                    self.make_launch_toast_for_path(
+                        &instance_path,
+                        "Minecraft failed to launch",
+                        "See logs for details".to_string(),
+                        true,
+                    );
                     self.refresh_selected_content();
                 }
                 LaunchWorkerEvent::Progress {
@@ -2772,6 +4705,12 @@ impl PrismarineApp {
             Ok(file) => file,
             Err(err) => {
                 self.status = format!("Failed to open log file: {err}");
+                self.make_launch_toast_for_instance(
+                    &ctx.instance,
+                    "Minecraft failed to launch",
+                    ctx.instance.name.clone(),
+                    true,
+                );
                 return;
             }
         };
@@ -2785,6 +4724,12 @@ impl PrismarineApp {
             Ok(f) => f,
             Err(err) => {
                 self.status = format!("Failed to clone log handle: {err}");
+                self.make_launch_toast_for_instance(
+                    &ctx.instance,
+                    "Minecraft failed to launch",
+                    ctx.instance.name.clone(),
+                    true,
+                );
                 return;
             }
         };
@@ -2792,6 +4737,12 @@ impl PrismarineApp {
             Ok(f) => f,
             Err(err) => {
                 self.status = format!("Failed to clone log handle: {err}");
+                self.make_launch_toast_for_instance(
+                    &ctx.instance,
+                    "Minecraft failed to launch",
+                    ctx.instance.name.clone(),
+                    true,
+                );
                 return;
             }
         };
@@ -2825,10 +4776,20 @@ impl PrismarineApp {
                         &ctx.instance.path,
                         &format!("[Launcher] Process exited immediately with code {code}"),
                     );
+                    self.make_launch_toast_for_instance(
+                        &ctx.instance,
+                        "Minecraft failed to launch",
+                        ctx.instance.name.clone(),
+                        true,
+                    );
                     self.refresh_selected_content();
                     return;
                 }
+                let pid = child.id();
                 self.processes.insert(ctx.instance.path.clone(), child);
+                self.running_process_pids.insert(ctx.instance.path.clone(), pid);
+                self.persist_running_processes();
+                self.last_stopped_instance_path = None;
                 if let Some(post) = ctx.post_exit {
                     self.post_exit_commands
                         .insert(ctx.instance.path.clone(), post);
@@ -2844,6 +4805,12 @@ impl PrismarineApp {
                 self.append_launcher_log(
                     &ctx.instance.path,
                     &format!("[Launcher] Failed to spawn process: {err}"),
+                );
+                self.make_launch_toast_for_instance(
+                    &ctx.instance,
+                    "Minecraft failed to launch",
+                    ctx.instance.name.clone(),
+                    true,
                 );
                 self.refresh_selected_content();
             }
@@ -2869,6 +4836,9 @@ impl PrismarineApp {
             match child.kill() {
                 Ok(_) => {
                     let _ = child.wait();
+                    self.running_process_pids.remove(&instance.path);
+                    self.persist_running_processes();
+                    self.last_stopped_instance_path = Some(instance.path.clone());
                     if let Some(post) = self.post_exit_commands.remove(&instance.path) {
                         let _ = Command::new("sh")
                             .arg("-lc")
@@ -2877,6 +4847,25 @@ impl PrismarineApp {
                             .status();
                     }
                     self.status = format!("Stopped {}", instance.name);
+                }
+                Err(err) => {
+                    self.status = format!("Failed to stop {}: {}", instance.name, err);
+                }
+            }
+        } else if let Some(pid) = self.running_pid_for_instance(&instance.path) {
+            let result = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+            match result {
+                Ok(s) if s.success() => {
+                    self.running_process_pids.remove(&instance.path);
+                    self.persist_running_processes();
+                    self.last_stopped_instance_path = Some(instance.path.clone());
+                    self.status = format!("Stopped {}", instance.name);
+                }
+                Ok(_) => {
+                    self.status = format!("Failed to stop {} (pid {})", instance.name, pid);
                 }
                 Err(err) => {
                     self.status = format!("Failed to stop {}: {}", instance.name, err);
@@ -2892,6 +4881,7 @@ impl PrismarineApp {
     fn open_create_dialog(&mut self) {
         self.create_mode = CreateMode::Custom;
         self.create_name.clear();
+        self.create_group.clear();
         self.create_game_version.clear();
         self.create_loader = None;
         self.create_import_path.clear();
@@ -3046,6 +5036,7 @@ impl PrismarineApp {
 
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.show_news, "Show News Bar");
+                ui.checkbox(&mut self.show_download_panel, "Show Download Panel");
             });
 
             ui.menu_button("Folders", |ui| {
@@ -3057,43 +5048,75 @@ impl PrismarineApp {
                 }
             });
 
-            ui.menu_button("Accounts", |ui| {
-                for idx in 0..self.accounts.len() {
-                    let active = self.accounts[idx].active;
-                    let mut name = self.accounts[idx].name.clone();
-                    if self.accounts[idx].account_type == AccountType::Licensed {
-                        if self.accounts[idx].licensed {
-                            name.push_str(" [licensed]");
-                        } else {
-                            name.push_str(" [unverified]");
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        let skin_name = self.accounts[idx].name.clone();
-                        let body_url = minecraft_body_icon_url(&skin_name);
-                        if let Some(tex) = self.ensure_icon_texture_from_source(ui.ctx(), &body_url)
-                        {
-                            ui.image((tex.id(), egui::vec2(12.0, 24.0)));
-                        } else {
-                            ui.add_space(12.0);
-                        }
-                        if ui.selectable_label(active, name).clicked() {
-                            self.set_active_account(idx);
-                        }
-                    });
+            let active = self.active_account().cloned().unwrap_or_default();
+            let active_name = active.name.clone();
+            if active.account_type == AccountType::Offline {
+                let tex = self.ensure_offline_head_texture(ui.ctx());
+                let resp = ui.menu_image_text_button(
+                    (tex.id(), egui::vec2(14.0, 14.0)),
+                    "Accounts",
+                    |ui| self.draw_accounts_menu_contents(ui),
+                );
+                resp.response
+                    .on_hover_text(format!("Active account: {active_name}"));
+            } else if let Some(head_path) = self.ensure_account_head_cached_async(&active_name) {
+                if let Some(tex) = self.ensure_icon_texture(ui.ctx(), &head_path) {
+                    let resp = ui.menu_image_text_button(
+                        (tex.id(), egui::vec2(14.0, 14.0)),
+                        "Accounts",
+                        |ui| self.draw_accounts_menu_contents(ui),
+                    );
+                    resp.response
+                        .on_hover_text(format!("Active account: {active_name}"));
+                } else {
+                    ui.menu_button("Accounts", |ui| self.draw_accounts_menu_contents(ui));
                 }
-                ui.separator();
-                if ui.button("Add Licensed Account").clicked() {
-                    self.show_add_account_dialog = true;
-                    ui.close();
-                }
-            });
+            } else {
+                ui.menu_button("Accounts", |ui| self.draw_accounts_menu_contents(ui));
+            }
 
             ui.menu_button("Help", |ui| {
                 ui.label("PrismarineLauncher Rust UI migration build");
                 ui.label("Goal: parity with existing Qt interface and behavior");
             });
         });
+    }
+
+    fn draw_accounts_menu_contents(&mut self, ui: &mut egui::Ui) {
+        for idx in 0..self.accounts.len() {
+            let active = self.accounts[idx].active;
+            let name = self.accounts[idx].name.clone();
+            let is_offline = self.accounts[idx].account_type == AccountType::Offline;
+            ui.horizontal(|ui| {
+                if is_offline {
+                    let tex = self.ensure_offline_head_texture(ui.ctx());
+                    let avatar_resp = ui.image((tex.id(), egui::vec2(16.0, 16.0)));
+                    avatar_resp.on_hover_text(format!("Player: {name}"));
+                } else if let Some(head_path) = self.ensure_account_head_cached_async(&name) {
+                    if let Some(tex) = self.ensure_icon_texture(ui.ctx(), &head_path) {
+                        let avatar_resp = ui.image((tex.id(), egui::vec2(16.0, 16.0)));
+                        avatar_resp.on_hover_text(format!("Player: {name}"));
+                    } else {
+                        ui.add_space(16.0);
+                    }
+                } else {
+                    ui.add_space(16.0);
+                }
+                if ui.selectable_label(active, name).clicked() {
+                    self.set_active_account(idx);
+                }
+            });
+        }
+        ui.separator();
+        if ui.button("Manage Accounts...").clicked() {
+            self.manage_account_selected = self
+                .accounts
+                .iter()
+                .position(|a| a.active)
+                .or_else(|| (!self.accounts.is_empty()).then_some(0));
+            self.show_manage_accounts_dialog = true;
+            ui.close();
+        }
     }
 
     fn ensure_icon_texture(
@@ -3106,12 +5129,24 @@ impl PrismarineApp {
         }
 
         let bytes = fs::read(icon_path).ok()?;
-        let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
-        let size = [decoded.width() as usize, decoded.height() as usize];
+        let ext = Path::new(icon_path)
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let (rgba, width, height) = if ext == "svg" {
+            decode_svg_rgba(&bytes)?
+        } else {
+            let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
+            let w = decoded.width() as usize;
+            let h = decoded.height() as usize;
+            (decoded.into_raw(), w, h)
+        };
+        let size = [width, height];
         if size[0] == 0 || size[1] == 0 {
             return None;
         }
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
         let texture = ctx.load_texture(
             format!("instance_icon::{icon_path}"),
             color_image,
@@ -3194,7 +5229,112 @@ impl PrismarineApp {
         Some(tex)
     }
 
+    fn ensure_builtin_icon_texture(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+        bytes: &[u8],
+    ) -> Option<egui::TextureHandle> {
+        if let Some(tex) = self.icon_cache.get(key) {
+            return Some(tex.clone());
+        }
+        let decoded = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let size = [decoded.width() as usize, decoded.height() as usize];
+        if size[0] == 0 || size[1] == 0 {
+            return None;
+        }
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+        let tex = ctx.load_texture(key.to_string(), color, egui::TextureOptions::LINEAR);
+        self.icon_cache.insert(key.to_string(), tex.clone());
+        Some(tex)
+    }
+
+    fn ensure_loader_icon_texture(
+        &mut self,
+        ctx: &egui::Context,
+        loader: &str,
+    ) -> Option<egui::TextureHandle> {
+        match loader {
+            "fabric" => self.ensure_builtin_icon_texture(
+                ctx,
+                "loader_icon_fabric",
+                include_bytes!("../ui/assets/loader_icons/fabric.png"),
+            ),
+            "forge" => self.ensure_builtin_icon_texture(
+                ctx,
+                "loader_icon_forge",
+                include_bytes!("../ui/assets/loader_icons/forge.png"),
+            ),
+            "quilt" => self.ensure_builtin_icon_texture(
+                ctx,
+                "loader_icon_quilt",
+                include_bytes!("../ui/assets/loader_icons/quilt.png"),
+            ),
+            "neoforge" => self.ensure_builtin_icon_texture(
+                ctx,
+                "loader_icon_neoforge",
+                include_bytes!("../ui/assets/loader_icons/neoforge.png"),
+            ),
+            _ => self.ensure_builtin_icon_texture(
+                ctx,
+                "loader_icon_vanilla",
+                include_bytes!("../ui/assets/loader_icons/vanilla.png"),
+            ),
+        }
+    }
+
+    fn ensure_create_loader_icon_texture(
+        &mut self,
+        ctx: &egui::Context,
+        loader: &CreateLoader,
+    ) -> Option<egui::TextureHandle> {
+        self.ensure_loader_icon_texture(ctx, loader.cfg_value())
+    }
+
+    fn ensure_offline_head_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
+        let key = "offline_head_texture_custom";
+        if let Some(tex) = self.icon_cache.get(key) {
+            return tex.clone();
+        }
+        let cache_path = self
+            .data_root
+            .join("cache")
+            .join("offline")
+            .join("offline_head.png");
+        if !cache_path.is_file() {
+            let _ = download_file_to_path(
+                &format!("https://minotar.net/helm/{OFFLINE_SKIN_ID}/64.png"),
+                &cache_path,
+            );
+        }
+        if let Some(tex) = self.ensure_icon_texture(ctx, &cache_path.display().to_string()) {
+            self.icon_cache.insert(key.to_string(), tex.clone());
+            return tex;
+        }
+        let fallback_key = "offline_head_texture_fallback";
+        if let Some(tex) = self.icon_cache.get(fallback_key) {
+            return tex.clone();
+        }
+        let mut rgba = Vec::with_capacity(8 * 8 * 4);
+        for y in 0..8 {
+            for x in 0..8 {
+                let c = if (x + y) % 2 == 0 { 118 } else { 90 };
+                rgba.extend_from_slice(&[c, c, c, 255]);
+            }
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([8, 8], &rgba);
+        let tex = ctx.load_texture(
+            fallback_key.to_string(),
+            image,
+            egui::TextureOptions::NEAREST,
+        );
+        self.icon_cache.insert(fallback_key.to_string(), tex.clone());
+        tex
+    }
+
     fn draw_instance_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let old_selectable = ui.style().interaction.selectable_labels;
+        ui.style_mut().interaction.selectable_labels = false;
         ui.horizontal(|ui| {
             ui.label("Filter:");
             ui.text_edit_singleline(&mut self.filter);
@@ -3202,49 +5342,266 @@ impl PrismarineApp {
         ui.separator();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for idx in 0..self.instances.len() {
-                let instance = self.instances[idx].clone();
-                if !self.filter.is_empty()
-                    && !instance
-                        .name
-                        .to_lowercase()
-                        .contains(&self.filter.to_lowercase())
-                {
+            let mut bucket_order = vec![String::new()];
+            for g in self.all_group_names() {
+                if !bucket_order.iter().any(|x| x == &g) {
+                    bucket_order.push(g);
+                }
+            }
+            let mut rendered_any = false;
+            let mut pending_drop_group: Option<String> = None;
+            let mut pending_create_group = false;
+            let mut pending_set_group_icon: Option<String> = None;
+            let mut pending_delete_group: Option<String> = None;
+            let mut pending_assign_group: Option<String> = None;
+            let mut pending_launch_selected = false;
+            let filter_lc = self.filter.to_lowercase();
+
+            for group in bucket_order {
+                let group_top = ui.cursor().min.y;
+                let visible_indices: Vec<usize> = (0..self.instances.len())
+                    .filter(|idx| {
+                        let inst = &self.instances[*idx];
+                        if inst.group != group {
+                            return false;
+                        }
+                        if filter_lc.is_empty() {
+                            return true;
+                        }
+                        inst.name.to_lowercase().contains(&filter_lc)
+                    })
+                    .collect();
+                if visible_indices.is_empty() && self.dragging_instance_path.is_none() {
                     continue;
                 }
+                rendered_any = true;
 
-                let selected = self.selected == Some(idx);
-                let status = if self.launch_in_progress.contains(&instance.path) {
-                    "preparing"
-                } else if instance.running {
-                    "running"
+                let title = if group.is_empty() {
+                    "No group".to_string()
                 } else {
-                    "stopped"
+                    format!("Group: {}", group)
                 };
-                let line = format!("{} [{} | {}]", instance.name, instance.version, status);
-                let row_height = ui.text_style_height(&egui::TextStyle::Body).max(18.0);
-                ui.horizontal(|ui| {
-                    if let Some(icon_path) = &instance.icon_path {
-                        if let Some(tex) = self.ensure_icon_texture(ctx, icon_path) {
-                            ui.image((tex.id(), egui::vec2(row_height, row_height)));
-                        } else {
-                            ui.add_space(row_height);
+                let header_resp = ui
+                    .horizontal(|ui| {
+                        if !group.is_empty()
+                            && let Some(icon) = self.group_icon_path(&group)
+                            && let Some(tex) = self.ensure_icon_texture(ctx, &icon)
+                        {
+                            ui.image((tex.id(), egui::vec2(16.0, 16.0)));
                         }
-                    } else {
-                        ui.add_space(row_height);
+                        ui.strong(title);
+                        if self.dragging_instance_path.is_some() {
+                            ui.label("← drop here");
+                        }
+                    })
+                    .response;
+                header_resp.context_menu(|ui| {
+                    if ui.button("Create Group").clicked() {
+                        pending_create_group = true;
+                        ui.close();
                     }
-                    if ui.selectable_label(selected, line).clicked() {
-                        self.selected = Some(idx);
+                    if !group.is_empty() {
+                        if ui.button("Rename Group").clicked() {
+                            self.rename_group_old = group.clone();
+                            self.rename_group_new = group.clone();
+                            self.show_rename_group_dialog = true;
+                            ui.close();
+                        }
+                        if ui.button("Set Group Icon").clicked() {
+                            pending_set_group_icon = Some(group.clone());
+                            ui.close();
+                        }
+                        if ui.button("Delete Group").clicked() {
+                            pending_delete_group = Some(group.clone());
+                            ui.close();
+                        }
+                    }
+                });
+
+                for idx in visible_indices {
+                    let instance = self.instances[idx].clone();
+                    let mut meta = vec![instance.version.clone(), instance.loader.clone()];
+                    if instance.running {
+                        meta.push("running".to_string());
+                    } else if self.last_stopped_instance_path.as_deref() == Some(&instance.path) {
+                        meta.push("stopped".to_string());
+                    }
+                    let icon_size = 22.0;
+                    let row_height = (ui.text_style_height(&egui::TextStyle::Body) * 2.0 + 6.0)
+                        .max(icon_size + 4.0);
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(icon_size + 4.0, row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                if let Some(icon_path) = &instance.icon_path {
+                                    if let Some(tex) = self.ensure_icon_texture(ctx, icon_path) {
+                                        ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                                    } else {
+                                        ui.add_space(icon_size);
+                                    }
+                                } else if let Some(tex) =
+                                    self.ensure_loader_icon_texture(ctx, &instance.loader)
+                                {
+                                    ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                                } else {
+                                    ui.add_space(icon_size);
+                                }
+                            },
+                        );
+                        let is_selected = self.selected == Some(idx);
+                        let line = format!("{}\n[{}]", instance.name, meta.join(" | "));
+                        let text = egui::RichText::new(line).size(18.0);
+                        let fill = if is_selected {
+                            ui.visuals().selection.bg_fill
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        let response = egui::Frame::NONE
+                            .fill(fill)
+                            .show(ui, |ui| {
+                                let mut out = None;
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(ui.available_width(), row_height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        out = Some(ui.add(
+                                            egui::Label::new(text)
+                                                .wrap()
+                                                .sense(egui::Sense::click_and_drag()),
+                                        ));
+                                    },
+                                );
+                                out.expect("instance row response")
+                            })
+                            .inner;
+                        if response.clicked() {
+                            self.selected = Some(idx);
+                        }
+                        if response.double_clicked() {
+                            self.selected = Some(idx);
+                            pending_launch_selected = true;
+                        }
+                        if response.drag_started() {
+                            self.selected = Some(idx);
+                            self.dragging_instance_path = Some(instance.path.clone());
+                        }
+                        response.context_menu(|ui| {
+                            let is_running = instance.running;
+                            if ui
+                                .button(if is_running { "Kill" } else { "Launch" })
+                                .clicked()
+                            {
+                                self.selected = Some(idx);
+                                if is_running {
+                                    self.do_kill_instance();
+                                } else {
+                                    self.do_launch_instance();
+                                }
+                                ui.close();
+                            }
+                            ui.separator();
+                            ui.menu_button("Group Management", |ui| {
+                                if ui.button("Move to No group").clicked() {
+                                    self.selected = Some(idx);
+                                    pending_assign_group = Some(String::new());
+                                    ui.close();
+                                }
+                                for g in self.all_group_names() {
+                                    if ui.button(format!("Move to {}", g)).clicked() {
+                                        self.selected = Some(idx);
+                                        pending_assign_group = Some(g);
+                                        ui.close();
+                                    }
+                                }
+                                if ui.button("Create Group").clicked() {
+                                    pending_create_group = true;
+                                    ui.close();
+                                }
+                            });
+                            ui.separator();
+                            if ui.button("Set Icon").clicked() {
+                                self.selected = Some(idx);
+                                self.open_set_icon_dialog_for_instance(idx);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Delete Instance").clicked() {
+                                self.selected = Some(idx);
+                                self.show_delete_dialog = true;
+                                ui.close();
+                            }
+                        });
+                    });
+                }
+                ui.add_space(6.0);
+
+                let group_bottom = ui.cursor().min.y;
+                let group_rect = egui::Rect::from_min_max(
+                    egui::pos2(ui.min_rect().left(), group_top),
+                    egui::pos2(ui.max_rect().right(), group_bottom),
+                );
+                if self.dragging_instance_path.is_some() {
+                    let pointer_pos = ui.input(|i| i.pointer.latest_pos());
+                    if let Some(pos) = pointer_pos
+                        && group_rect.contains(pos)
+                    {
+                        let painter = ui.painter();
+                        painter.rect_stroke(
+                            group_rect,
+                            2.0,
+                            egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
+                            egui::StrokeKind::Outside,
+                        );
+                        if ui.input(|i| i.pointer.any_released()) && pending_drop_group.is_none() {
+                            pending_drop_group = Some(group.clone());
+                        }
+                    }
+                }
+            }
+
+            if !rendered_any {
+                let empty_resp = ui.label("No instances");
+                empty_resp.context_menu(|ui| {
+                    if ui.button("Create Group").clicked() {
+                        pending_create_group = true;
+                        ui.close();
                     }
                 });
             }
+
+            if pending_create_group {
+                self.show_create_group_dialog = true;
+                self.create_group_name.clear();
+            }
+            if let Some(group_name) = pending_set_group_icon {
+                self.do_set_group_icon(&group_name);
+            }
+            if let Some(group_name) = pending_delete_group {
+                self.do_delete_group(&group_name);
+            }
+            if let Some(group_name) = pending_assign_group {
+                self.do_assign_selected_instance_group(&group_name);
+            }
+            if pending_launch_selected {
+                self.do_launch_instance();
+            }
+            if let Some(target_group) = pending_drop_group
+                && let Some(path) = self.dragging_instance_path.clone()
+            {
+                self.do_assign_instance_group_by_path(&path, &target_group);
+            }
+            if ui.input(|i| i.pointer.any_released()) {
+                self.dragging_instance_path = None;
+            }
         });
+        ui.style_mut().interaction.selectable_labels = old_selectable;
     }
 
     fn tab_selector(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.active_tab, CenterTab::Overview, "Overview");
-            ui.selectable_value(&mut self.active_tab, CenterTab::Mods, "Mods");
+            ui.selectable_value(&mut self.active_tab, CenterTab::Mods, "Content");
             ui.selectable_value(&mut self.active_tab, CenterTab::Logs, "Logs");
             ui.selectable_value(&mut self.active_tab, CenterTab::Settings, "Settings");
         });
@@ -3256,6 +5613,14 @@ impl PrismarineApp {
             ui.heading(&instance.name);
             ui.label(format!("Path: {}", instance.path));
             ui.label(format!("Version: {}", instance.version));
+            ui.label(format!(
+                "Group: {}",
+                if instance.group.trim().is_empty() {
+                    "No group"
+                } else {
+                    &instance.group
+                }
+            ));
             ui.label(format!(
                 "State: {}",
                 if instance.running {
@@ -3278,128 +5643,510 @@ impl PrismarineApp {
     }
 
     fn draw_mods_tab(&mut self, ui: &mut egui::Ui) {
-        self.draw_download_queue(ui);
+        let current_total = match self.download_content_type {
+            DownloadContentType::Mods => self.mods_cache.len(),
+            DownloadContentType::ResourcePacks => self.resourcepacks_cache.len(),
+            DownloadContentType::ShaderPacks => self.shaderpacks_cache.len(),
+            DownloadContentType::Worlds => self.worlds_cache.len(),
+            DownloadContentType::Servers => self.servers_cache.len(),
+            DownloadContentType::Screenshots => self.screenshots_cache.len(),
+        };
+        let search_label = match self.download_content_type {
+            DownloadContentType::Mods => "Installed mods search:",
+            DownloadContentType::ResourcePacks => "Installed resource packs search:",
+            DownloadContentType::ShaderPacks => "Installed shader packs search:",
+            DownloadContentType::Worlds => "Installed worlds search:",
+            DownloadContentType::Servers => "Installed servers search:",
+            DownloadContentType::Screenshots => "Installed screenshots search:",
+        };
         ui.horizontal(|ui| {
-            if ui.button("Add Jar").clicked() {
-                self.do_add_jar_to_mods();
+            if ui.button("Add Content").clicked() {
+                self.do_add_content_file();
             }
-            if ui.button("Auto Update Mods").clicked() {
+            if self.download_content_type == DownloadContentType::Mods
+                && ui.button("Auto Update Mods").clicked()
+            {
                 self.do_auto_update_mods();
             }
-            if ui.button("Download Mods").clicked() {
+            if ui.button("Download Content").clicked() {
                 self.show_download_panel = !self.show_download_panel;
             }
-            ui.label(format!("Total: {}", self.mods_cache.len()));
+            ui.separator();
+            ui.label(format!("Total: {}", current_total));
         });
         ui.horizontal(|ui| {
-            ui.label("Installed mods search:");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                ui.vertical(|ui| {
+                    let items: &[(DownloadContentType, &str, &str)] = &[
+                        (
+                            DownloadContentType::Mods,
+                            "Mods",
+                            "https://minecraft.wiki/images/Impulse_Command_Block.gif?fb024?download",
+                        ),
+                        (
+                            DownloadContentType::ResourcePacks,
+                            "Resource Packs",
+                            "https://minecraft.wiki/images/White_Dye_JE2_BE2.png?f9a07?download",
+                        ),
+                        (
+                            DownloadContentType::ShaderPacks,
+                            "Shader Packs",
+                            "https://ru.minecraft.wiki/images/%D0%A1%D0%B2%D0%B5%D1%82%D1%8F%D1%89%D0%B8%D0%B9%D1%81%D1%8F_%D1%87%D0%B5%D1%80%D0%BD%D0%B8%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9_%D0%BC%D0%B5%D1%88%D0%BE%D0%BA_JE1.png?377c1?download",
+                        ),
+                        (
+                            DownloadContentType::Worlds,
+                            "Worlds",
+                            "https://minecraft.wiki/images/Grass_Block_JE7_BE6.png?2bd37?download",
+                        ),
+                        (
+                            DownloadContentType::Servers,
+                            "Servers",
+                            "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download",
+                        ),
+                        (
+                            DownloadContentType::Screenshots,
+                            "Screenshots",
+                            "https://minecraft.wiki/images/Painting_JE2_BE2.png?45334?download",
+                        ),
+                    ];
+                    for (idx, (kind, title, icon_url)) in items.iter().enumerate() {
+                        let selected = self.download_content_type == *kind;
+                        let mut clicked = false;
+                        ui.vertical_centered(|ui| {
+                            if let Some(tex) = self.ensure_icon_texture_from_source(ui.ctx(), icon_url)
+                            {
+                                if ui
+                                    .add(
+                                        egui::Button::image((tex.id(), egui::vec2(24.0, 24.0)))
+                                            .selected(selected),
+                                    )
+                                    .clicked()
+                                {
+                                    clicked = true;
+                                }
+                                if ui
+                                    .selectable_label(selected, egui::RichText::new(*title).size(12.0))
+                                    .clicked()
+                                {
+                                    clicked = true;
+                                }
+                            } else if ui.selectable_label(selected, *title).clicked() {
+                                clicked = true;
+                            }
+                        });
+                        if clicked {
+                            self.download_content_type = kind.clone();
+                            if self.show_download_panel
+                                && matches!(
+                                    self.download_content_type,
+                                    DownloadContentType::Mods
+                                        | DownloadContentType::ResourcePacks
+                                        | DownloadContentType::ShaderPacks
+                                )
+                            {
+                                self.request_selected_download_details();
+                                self.start_download_search(false);
+                            } else if !matches!(
+                                self.download_content_type,
+                                DownloadContentType::Mods
+                                    | DownloadContentType::ResourcePacks
+                                    | DownloadContentType::ShaderPacks
+                            ) {
+                                self.show_download_panel = false;
+                            }
+                        }
+                        if idx + 1 < items.len() {
+                            ui.separator();
+                        }
+                    }
+                });
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.label(search_label);
             ui.text_edit_singleline(&mut self.mods_filter);
         });
         ui.separator();
 
-        let mut pending_toggle: Option<(String, bool)> = None;
+        let supports_downloads = matches!(
+            self.download_content_type,
+            DownloadContentType::Mods
+                | DownloadContentType::ResourcePacks
+                | DownloadContentType::ShaderPacks
+        );
+        if self.show_download_panel && !supports_downloads {
+            self.show_download_panel = false;
+        }
+
+        let mut top_panel_max_height = f32::INFINITY;
+        let mut split_total_height = 0.0f32;
+        if self.show_download_panel {
+            let avail = ui.available_height().max(360.0);
+            split_total_height = avail;
+            let upper = (avail - 180.0).max(180.0);
+            top_panel_max_height =
+                (avail * self.content_list_ratio).clamp(140.0, upper);
+        }
+
         let mut pending_delete: Option<String> = None;
-        let filtered_mods: Vec<ModListEntry> = if self.mods_filter.trim().is_empty() {
-            self.mods_cache.clone()
-        } else {
-            let needle = self.mods_filter.to_lowercase();
-            self.mods_cache
-                .iter()
-                .filter(|m| {
-                    m.display_name.to_lowercase().contains(&needle)
-                        || m.name.to_lowercase().contains(&needle)
-                        || m.provider.to_lowercase().contains(&needle)
-                })
-                .cloned()
-                .collect()
-        };
-        let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(18.0);
-        if filtered_mods.is_empty() {
-            ui.label("No mods found");
-        } else {
-            ui.horizontal(|ui| {
-                ui.label("Enable");
-                ui.add_space(10.0);
-                ui.label("Image");
-                ui.add_space(16.0);
-                ui.label("Name");
-                ui.add_space(220.0);
-                ui.label("Version");
-                ui.add_space(50.0);
-                ui.label("Updated");
-                ui.add_space(30.0);
-                ui.label("Provider");
-            });
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("mods_table_scroll")
-                .max_height(300.0)
-                .show_rows(
-                    ui,
-                    row_height + 6.0,
-                    filtered_mods.len(),
-                    |ui, row_range| {
-                        for idx in row_range {
-                            let (
-                                enabled_now,
-                                file_path,
-                                icon_path,
-                                display_name,
-                                version,
-                                updated_at,
-                                provider,
-                            ) = {
-                                let item = &filtered_mods[idx];
-                                (
-                                    item.enabled,
-                                    item.file_path.clone(),
-                                    item.icon_path.clone(),
-                                    item.display_name.clone(),
-                                    item.version.clone(),
-                                    item.updated_at.clone(),
-                                    item.provider.clone(),
-                                )
-                            };
-                            ui.horizontal(|ui| {
-                                let mut enabled = enabled_now;
-                                if ui.checkbox(&mut enabled, "").changed() {
-                                    pending_toggle = Some((file_path.clone(), enabled));
-                                }
-                                if let Some(icon_path) = &icon_path {
-                                    if let Some(tex) =
-                                        self.ensure_icon_texture_from_source(ui.ctx(), icon_path)
-                                    {
-                                        ui.image((tex.id(), egui::vec2(row_height, row_height)));
-                                    } else {
-                                        ui.add_space(row_height);
-                                    }
-                                } else {
-                                    ui.add_space(row_height);
-                                }
-                                let label_response = ui.label(display_name.as_str());
-                                label_response.context_menu(|ui| {
+        if self.download_content_type == DownloadContentType::Mods {
+            let mut pending_toggle: Option<(String, bool)> = None;
+            let filtered_mod_indices: Vec<usize> = if self.mods_filter.trim().is_empty() {
+                (0..self.mods_cache.len()).collect()
+            } else {
+                let needle = self.mods_filter.to_lowercase();
+                self.mods_cache
+                    .iter()
+                    .enumerate()
+                    .filter(|m| {
+                        m.1.display_name.to_lowercase().contains(&needle)
+                            || m.1.name.to_lowercase().contains(&needle)
+                            || m.1.provider.to_lowercase().contains(&needle)
+                    })
+                    .map(|(idx, _)| idx)
+                    .collect()
+            };
+            let table_font_size = 17.0;
+            let row_height = ui.text_style_height(&egui::TextStyle::Body).max(24.0);
+            let icon_size = (row_height + 2.0) * 1.3;
+            if filtered_mod_indices.is_empty() {
+                ui.label("No content found");
+            } else {
+                let total_width = ui.available_width().max(520.0);
+                let col_enable = 72.0;
+                let col_image = 44.0;
+                let col_version = 150.0;
+                let col_updated = 130.0;
+                let col_provider = 110.0;
+                let spacing = ui.spacing().item_spacing.x;
+                let fixed = col_enable + col_image + col_version + col_updated + col_provider;
+                let gaps = 5.0 * spacing;
+                let col_name = (total_width - fixed - gaps).max(220.0);
+                let mut scroll = egui::ScrollArea::vertical().id_salt("mods_table_scroll");
+                if self.show_download_panel {
+                    scroll = scroll.max_height(top_panel_max_height);
+                }
+                scroll.show(ui, |ui| {
+                        egui::Grid::new("mods_table_grid")
+                            .num_columns(6)
+                            .striped(true)
+                            .show(ui, |ui| {
+                            ui.add_sized(
+                                [col_enable, 0.0],
+                                egui::Label::new(egui::RichText::new("Enable").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_image, 0.0],
+                                egui::Label::new(egui::RichText::new("Image").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_name, 0.0],
+                                egui::Label::new(egui::RichText::new("Name").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_version, 0.0],
+                                egui::Label::new(egui::RichText::new("Version").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_updated, 0.0],
+                                egui::Label::new(egui::RichText::new("Updated").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_provider, 0.0],
+                                egui::Label::new(egui::RichText::new("Provider").size(table_font_size)),
+                            );
+                            ui.end_row();
+
+                            for idx in &filtered_mod_indices {
+                                let (enabled_now, file_path, icon_path, display_name, version, updated_at, provider) = {
+                                    let item = &self.mods_cache[*idx];
+                                    (
+                                        item.enabled,
+                                        item.file_path.clone(),
+                                        item.icon_path.clone(),
+                                        item.display_name.clone(),
+                                        item.version.clone(),
+                                        item.updated_at.clone(),
+                                        item.provider.clone(),
+                                    )
+                                };
+
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(col_enable, row_height + 2.0),
+                                    egui::Layout::left_to_right(egui::Align::Min),
+                                    |ui| {
+                                        let mut enabled = enabled_now;
+                                        if ui.checkbox(&mut enabled, "").changed() {
+                                            pending_toggle = Some((file_path.clone(), enabled));
+                                        }
+                                    },
+                                );
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(col_image, row_height + 2.0),
+                                    egui::Layout::left_to_right(egui::Align::Min),
+                                    |ui| {
+                                        if let Some(icon_path) = &icon_path {
+                                            if let Some(tex) = self
+                                                .ensure_icon_texture_from_source(ui.ctx(), icon_path)
+                                            {
+                                                ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                                            } else {
+                                                ui.add_space(icon_size);
+                                            }
+                                        } else {
+                                            ui.add_space(icon_size);
+                                        }
+                                    },
+                                );
+                                let name_resp = ui.add_sized(
+                                    [col_name, row_height + 2.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(display_name.as_str()).size(table_font_size),
+                                    )
+                                    .truncate(),
+                                );
+                                name_resp.context_menu(|ui| {
                                     if ui.button("Delete mod").clicked() {
                                         pending_delete = Some(file_path.clone());
                                         ui.close();
                                     }
                                 });
-                                ui.add_space(20.0);
-                                ui.monospace(version.as_str());
-                                ui.add_space(20.0);
-                                ui.monospace(updated_at.as_str());
-                                ui.add_space(20.0);
-                                ui.label(provider.as_str());
-                            });
-                            ui.separator();
-                        }
-                    },
-                );
-        }
-        if let Some((file_path, enabled)) = pending_toggle {
-            self.do_toggle_mod_enabled(&file_path, enabled);
+                                if name_resp.hovered() {
+                                    name_resp.clone().on_hover_text(display_name.clone());
+                                }
+                                if self.download_content_type == DownloadContentType::Screenshots
+                                    && name_resp.double_clicked()
+                                {
+                                    self.copy_image_file_to_clipboard(&file_path);
+                                }
+                                ui.add_sized(
+                                    [col_version, row_height + 2.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(compact_mod_version(&version))
+                                            .size(table_font_size),
+                                    )
+                                        .truncate(),
+                                );
+                                ui.add_sized(
+                                    [col_updated, row_height + 2.0],
+                                    egui::Label::new(egui::RichText::new(updated_at).size(table_font_size))
+                                        .truncate(),
+                                );
+                                ui.add_sized(
+                                    [col_provider, row_height + 2.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(provider.as_str()).size(table_font_size),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                });
+            }
+            if let Some((file_path, enabled)) = pending_toggle {
+                self.do_toggle_mod_enabled(&file_path, enabled);
+            }
+        } else {
+            let mut pending_toggle: Option<(String, bool)> = None;
+            let source = match self.download_content_type {
+                DownloadContentType::ResourcePacks => &self.resourcepacks_cache,
+                DownloadContentType::ShaderPacks => &self.shaderpacks_cache,
+                DownloadContentType::Worlds => &self.worlds_cache,
+                DownloadContentType::Servers => &self.servers_cache,
+                DownloadContentType::Screenshots => &self.screenshots_cache,
+                DownloadContentType::Mods => unreachable!(),
+            };
+            let supports_toggle = matches!(
+                self.download_content_type,
+                DownloadContentType::ResourcePacks | DownloadContentType::ShaderPacks
+            );
+            let filtered: Vec<ContentListEntry> = if self.mods_filter.trim().is_empty() {
+                source.clone()
+            } else {
+                let needle = self.mods_filter.to_lowercase();
+                source
+                    .iter()
+                    .filter(|x| {
+                        x.display_name.to_lowercase().contains(&needle)
+                            || x.name.to_lowercase().contains(&needle)
+                            || x.provider.to_lowercase().contains(&needle)
+                    })
+                    .cloned()
+                    .collect()
+            };
+            if filtered.is_empty() {
+                let msg = match self.download_content_type {
+                    DownloadContentType::ResourcePacks => "No resource packs found",
+                    DownloadContentType::ShaderPacks => "No shader packs found",
+                    DownloadContentType::Worlds => "No worlds found",
+                    DownloadContentType::Servers => "No server data found",
+                    DownloadContentType::Screenshots => "No screenshots found",
+                    DownloadContentType::Mods => "No content found",
+                };
+                ui.label(msg);
+            } else {
+                let table_font_size = 17.0;
+                let row_height = ui.text_style_height(&egui::TextStyle::Body).max(24.0);
+                let icon_size = (row_height + 2.0) * 1.3;
+                let total_width = ui.available_width().max(520.0);
+                let col_enable = 72.0;
+                let col_image = 44.0;
+                let col_version = 150.0;
+                let col_updated = 130.0;
+                let col_provider = 110.0;
+                let spacing = ui.spacing().item_spacing.x;
+                let fixed = col_enable + col_image + col_version + col_updated + col_provider;
+                let gaps = 5.0 * spacing;
+                let col_name = (total_width - fixed - gaps).max(220.0);
+                let mut scroll = egui::ScrollArea::vertical().id_salt("content_table_scroll");
+                if self.show_download_panel {
+                    scroll = scroll.max_height(top_panel_max_height);
+                }
+                scroll.show(ui, |ui| {
+                    egui::Grid::new("content_table_grid")
+                        .num_columns(6)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.add_sized(
+                                [col_enable, 0.0],
+                                egui::Label::new(egui::RichText::new("Enable").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_image, 0.0],
+                                egui::Label::new(egui::RichText::new("Image").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_name, 0.0],
+                                egui::Label::new(egui::RichText::new("Name").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_version, 0.0],
+                                egui::Label::new(egui::RichText::new("Version").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_updated, 0.0],
+                                egui::Label::new(egui::RichText::new("Updated").size(table_font_size)),
+                            );
+                            ui.add_sized(
+                                [col_provider, 0.0],
+                                egui::Label::new(egui::RichText::new("Provider").size(table_font_size)),
+                            );
+                            ui.end_row();
+
+                            for item in &filtered {
+                                let enabled_now = item.enabled;
+                                let file_path = item.file_path.clone();
+                                let icon_path = item.icon_path.clone();
+                                let display_name = item.display_name.clone();
+                                let version = item.version.clone();
+                                let updated_at = item.updated_at.clone();
+                                let provider = item.provider.clone();
+
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(col_enable, row_height + 2.0),
+                                    egui::Layout::left_to_right(egui::Align::Min),
+                                    |ui| {
+                                        if supports_toggle {
+                                            let mut enabled = enabled_now;
+                                            if ui.checkbox(&mut enabled, "").changed() {
+                                                pending_toggle = Some((file_path.clone(), enabled));
+                                            }
+                                        } else {
+                                            ui.add_space(18.0);
+                                        }
+                                    },
+                                );
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(col_image, row_height + 2.0),
+                                    egui::Layout::left_to_right(egui::Align::Min),
+                                    |ui| {
+                                        if let Some(icon_path) = &icon_path {
+                                            if let Some(tex) =
+                                                self.ensure_icon_texture_from_source(ui.ctx(), icon_path)
+                                            {
+                                                ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                                            } else {
+                                                ui.add_space(icon_size);
+                                            }
+                                        } else {
+                                            ui.add_space(icon_size);
+                                        }
+                                    },
+                                );
+                                let name_resp = ui.add_sized(
+                                    [col_name, row_height + 2.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(display_name.as_str()).size(table_font_size),
+                                    )
+                                    .truncate(),
+                                );
+                                name_resp.context_menu(|ui| {
+                                    if self.download_content_type == DownloadContentType::Screenshots
+                                        && ui.button("Copy screenshot").clicked()
+                                    {
+                                        self.copy_image_file_to_clipboard(&file_path);
+                                        ui.close();
+                                    }
+                                    if ui.button("Delete content").clicked() {
+                                        pending_delete = Some(file_path.clone());
+                                        ui.close();
+                                    }
+                                });
+                                if name_resp.hovered() {
+                                    name_resp.on_hover_text(display_name.clone());
+                                }
+                                ui.add_sized(
+                                    [col_version, row_height + 2.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(compact_mod_version(&version))
+                                            .size(table_font_size),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.add_sized(
+                                    [col_updated, row_height + 2.0],
+                                    egui::Label::new(egui::RichText::new(updated_at).size(table_font_size))
+                                        .truncate(),
+                                );
+                                ui.add_sized(
+                                    [col_provider, row_height + 2.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(provider.as_str()).size(table_font_size),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                });
+            }
+            if let Some((file_path, enabled)) = pending_toggle {
+                self.do_toggle_content_enabled(&file_path, enabled);
+            }
         }
         if let Some(file_path) = pending_delete {
             self.do_delete_mod_file(&file_path);
+        }
+
+        if self.show_download_panel {
+            let (split_rect, split_resp) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::drag());
+            ui.painter().line_segment(
+                [
+                    egui::pos2(split_rect.left(), split_rect.center().y),
+                    egui::pos2(split_rect.right(), split_rect.center().y),
+                ],
+                egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            );
+            if split_resp.hovered() || split_resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            }
+            if split_resp.dragged() && split_total_height > 1.0 {
+                self.content_list_ratio = (self.content_list_ratio
+                    + split_resp.drag_delta().y / split_total_height)
+                    .clamp(0.30, 0.80);
+            }
         }
 
         if !self.show_download_panel {
@@ -3410,8 +6157,14 @@ impl PrismarineApp {
         ui.group(|ui| {
             let mut provider_changed = false;
             let mut content_changed = false;
+            let mut close_downloads = false;
             ui.horizontal(|ui| {
-                ui.heading("Скачивание");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✕").on_hover_text("Hide Downloads").clicked() {
+                        close_downloads = true;
+                    }
+                });
+                ui.heading("Downloads");
                 content_changed |= ui
                     .selectable_value(
                         &mut self.download_content_type,
@@ -3424,6 +6177,13 @@ impl PrismarineApp {
                         &mut self.download_content_type,
                         DownloadContentType::ResourcePacks,
                         "Resource Packs",
+                    )
+                    .changed();
+                content_changed |= ui
+                    .selectable_value(
+                        &mut self.download_content_type,
+                        DownloadContentType::ShaderPacks,
+                        "Shader Packs",
                     )
                     .changed();
                 provider_changed |= ui
@@ -3441,12 +6201,16 @@ impl PrismarineApp {
                     )
                     .changed();
             });
+            if close_downloads {
+                self.show_download_panel = false;
+                return;
+            }
             if provider_changed || content_changed {
                 self.request_selected_download_details();
                 self.start_download_search(false);
             }
             ui.label(format!(
-                "Автоопределено: loader={} | version={}",
+                "Auto-detected: loader={} | version={}",
                 if self.modrinth_loader.is_empty() {
                     "unknown"
                 } else {
@@ -3475,58 +6239,104 @@ impl PrismarineApp {
                             self.do_modrinth_download_selected();
                         }
                     });
-                    ui.columns(2, |cols| {
+                    let panel_height = ui.available_height().max(140.0);
+                    let split_gap = ui.spacing().item_spacing.x.max(2.0);
+                    let total_w = ui.available_width().max(2.0);
+                    let content_w = (total_w - split_gap).max(2.0);
+                    let description_ratio = 0.56_f32;
+                    let right_w = (content_w * description_ratio).floor().max(1.0);
+                    let left_w = (content_w - right_w).max(1.0);
+                    ui.horizontal(|ui| {
                         let mut row_end = 0usize;
                         let mut pending_select = None;
                         let mut pending_queue = None;
-                        cols[0].label("Результаты");
-                        cols[0].separator();
-                        egui::ScrollArea::vertical()
-                            .id_salt("download_modrinth_results_scroll")
-                            .max_height(220.0)
-                            .show_rows(
-                                &mut cols[0],
-                                24.0,
-                                self.modrinth_hits.len(),
-                                |ui, row_range| {
-                                    row_end = row_range.end;
-                                    for idx in row_range {
-                                        let (icon_url, label) = {
-                                            let hit = &self.modrinth_hits[idx];
-                                            let mut label = hit.title.clone();
-                                            if !hit.author.trim().is_empty() {
-                                                label.push_str(&format!(" ({})", hit.author));
-                                            } else {
-                                                label.push_str(&format!(" ({})", hit.slug));
-                                            }
-                                            (hit.icon_url.clone(), label)
-                                        };
-                                        let selected = self.selected_modrinth_hit == Some(idx);
-                                        let row_h =
-                                            ui.text_style_height(&egui::TextStyle::Body).max(22.0);
-                                        ui.horizontal(|ui| {
-                                            if let Some(icon) = &icon_url {
-                                                if let Some(tex) = self
-                                                    .ensure_icon_texture_from_source(ui.ctx(), icon)
-                                                {
-                                                    ui.image((tex.id(), egui::vec2(row_h, row_h)));
-                                                } else {
-                                                    ui.add_space(row_h);
+                        let list_font_size = 17.0;
+                        let list_base_row = ui.text_style_height(&egui::TextStyle::Body).max(24.0);
+                        let list_icon_size = (list_base_row + 2.0) * 1.3;
+                        let list_row_height = (list_icon_size + 4.0).max(list_base_row + 4.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(left_w, panel_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.label("Results");
+                                ui.separator();
+                                egui::ScrollArea::vertical()
+                                    .id_salt("download_modrinth_results_scroll")
+                                    .max_height(panel_height)
+                                    .show_rows(
+                                        ui,
+                                        list_row_height,
+                                        self.modrinth_hits.len(),
+                                        |ui, row_range| {
+                                            row_end = row_range.end;
+                                            for idx in row_range {
+                                                let (icon_url, label) = {
+                                                    let hit = &self.modrinth_hits[idx];
+                                                    let mut label = hit.title.clone();
+                                                    if !hit.author.trim().is_empty() {
+                                                        label.push_str(&format!(" ({})", hit.author));
+                                                    } else {
+                                                        label.push_str(&format!(" ({})", hit.slug));
+                                                    }
+                                                    (hit.icon_url.clone(), label)
+                                                };
+                                                let selected = self.selected_modrinth_hit == Some(idx);
+                                                let row_resp = ui
+                                                    .horizontal(|ui| {
+                                                        if let Some(icon) = &icon_url {
+                                                            if let Some(tex) = self
+                                                                .ensure_icon_texture_from_source(
+                                                                    ui.ctx(),
+                                                                    icon,
+                                                                )
+                                                            {
+                                                                ui.image((
+                                                                    tex.id(),
+                                                                    egui::vec2(
+                                                                        list_icon_size,
+                                                                        list_icon_size,
+                                                                    ),
+                                                                ));
+                                                            } else {
+                                                                ui.add_space(list_icon_size);
+                                                            }
+                                                        } else {
+                                                            ui.add_space(list_icon_size);
+                                                        }
+                                                        let text_width = ui.available_width().max(80.0);
+                                                        let max_chars =
+                                                            ((text_width / 9.0).floor() as usize)
+                                                                .max(12);
+                                                        let label_short =
+                                                            truncate_with_ellipsis(&label, max_chars);
+                                                        let response = ui.add_sized(
+                                                            [text_width, list_row_height],
+                                                            egui::Button::new(
+                                                                egui::RichText::new(label_short)
+                                                                    .size(list_font_size),
+                                                            )
+                                                            .selected(selected)
+                                                            .frame(false),
+                                                        );
+                                                        if response.clicked() {
+                                                            pending_select = Some(idx);
+                                                        }
+                                                        if response.double_clicked() {
+                                                            pending_queue = Some(idx);
+                                                        }
+                                                    })
+                                                    .response;
+                                                if row_resp.clicked() {
+                                                    pending_select = Some(idx);
                                                 }
-                                            } else {
-                                                ui.add_space(row_h);
+                                                if row_resp.double_clicked() {
+                                                    pending_queue = Some(idx);
+                                                }
                                             }
-                                            let response = ui.selectable_label(selected, label);
-                                            if response.clicked() {
-                                                pending_select = Some(idx);
-                                            }
-                                            if response.double_clicked() {
-                                                pending_queue = Some(idx);
-                                            }
-                                        });
-                                    }
-                                },
-                            );
+                                        },
+                                    );
+                            },
+                        );
                         if let Some(idx) = pending_select {
                             self.selected_modrinth_hit = Some(idx);
                             self.request_selected_download_details();
@@ -3540,33 +6350,51 @@ impl PrismarineApp {
                         {
                             self.start_download_search(true);
                         }
-                        if self.download_search_loading {
-                            cols[0].label("Loading...");
-                        }
-
-                        cols[1].label("Описание");
-                        cols[1].separator();
-                        if let Some(icon) = self.download_details.icon_url.clone() {
-                            if let Some(tex) =
-                                self.ensure_icon_texture_from_source(cols[1].ctx(), &icon)
-                            {
-                                cols[1].image((tex.id(), egui::vec2(56.0, 56.0)));
-                            }
-                        }
-                        if !self.download_details.title.is_empty() {
-                            cols[1].heading(&self.download_details.title);
-                        }
-                        if self.download_details.markdown.trim().is_empty() {
-                            cols[1].label("Проект не выбран");
-                        } else {
-                            cols[1].push_id("modrinth_markdown_panel", |ui| {
-                                egui_commonmark::CommonMarkViewer::new().show(
-                                    ui,
-                                    &mut self.markdown_cache_modrinth,
-                                    &self.download_details.markdown,
-                                );
-                            });
-                        }
+                        ui.add_space(split_gap);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(right_w, panel_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                if self.download_search_loading {
+                                    ui.label("Loading...");
+                                } else if self.modrinth_hits.is_empty() {
+                                    ui.label("No results");
+                                }
+                                ui.label("Description");
+                                ui.separator();
+                                let details_icon = self.download_details.icon_url.clone();
+                                egui::ScrollArea::vertical()
+                                    .id_salt("download_modrinth_description_scroll")
+                                    .max_height(panel_height)
+                                    .show(ui, |ui| {
+                                        if let Some(icon) = details_icon.as_deref()
+                                            && let Some(tex) = self
+                                                .ensure_icon_texture_from_source(ui.ctx(), icon)
+                                        {
+                                            ui.image((tex.id(), egui::vec2(56.0, 56.0)));
+                                        }
+                                        if !self.download_details.title.is_empty() {
+                                            ui.heading(&self.download_details.title);
+                                        }
+                                        if self.download_details.markdown.trim().is_empty() {
+                                            ui.label("No project selected");
+                                        } else {
+                                            let max_img_w = (ui.available_width() - 28.0)
+                                                .clamp(96.0, 260.0)
+                                                as usize;
+                                            ui.push_id("modrinth_markdown_panel", |ui| {
+                                                egui_commonmark::CommonMarkViewer::new()
+                                                    .max_image_width(Some(max_img_w))
+                                                    .show(
+                                                        ui,
+                                                        &mut self.markdown_cache_modrinth,
+                                                        &self.download_details.markdown,
+                                                    );
+                                            });
+                                        }
+                                    });
+                            },
+                        );
                     });
                 }
                 DownloadProvider::CurseForge => {
@@ -3599,56 +6427,103 @@ impl PrismarineApp {
                             self.do_curseforge_download_url();
                         }
                     });
-                    ui.columns(2, |cols| {
+                    let panel_height = ui.available_height().max(140.0);
+                    let split_gap = ui.spacing().item_spacing.x.max(2.0);
+                    let total_w = ui.available_width().max(2.0);
+                    let content_w = (total_w - split_gap).max(2.0);
+                    let description_ratio = 0.56_f32;
+                    let right_w = (content_w * description_ratio).floor().max(1.0);
+                    let left_w = (content_w - right_w).max(1.0);
+                    ui.horizontal(|ui| {
                         let mut row_end = 0usize;
                         let mut pending_select = None;
                         let mut pending_queue = None;
-                        cols[0].label("Результаты");
-                        cols[0].separator();
-                        egui::ScrollArea::vertical()
-                            .id_salt("download_curseforge_results_scroll")
-                            .max_height(220.0)
-                            .show_rows(
-                                &mut cols[0],
-                                24.0,
-                                self.curseforge_hits.len(),
-                                |ui, row_range| {
-                                    row_end = row_range.end;
-                                    for idx in row_range {
-                                        let (icon_url, label) = {
-                                            let hit = &self.curseforge_hits[idx];
-                                            let mut label = hit.title.clone();
-                                            if !hit.author.trim().is_empty() {
-                                                label.push_str(&format!(" ({})", hit.author));
-                                            }
-                                            (hit.icon_url.clone(), label)
-                                        };
-                                        let selected = self.selected_curseforge_hit == Some(idx);
-                                        let row_h =
-                                            ui.text_style_height(&egui::TextStyle::Body).max(22.0);
-                                        ui.horizontal(|ui| {
-                                            if let Some(icon) = &icon_url {
-                                                if let Some(tex) = self
-                                                    .ensure_icon_texture_from_source(ui.ctx(), icon)
-                                                {
-                                                    ui.image((tex.id(), egui::vec2(row_h, row_h)));
-                                                } else {
-                                                    ui.add_space(row_h);
+                        let list_font_size = 17.0;
+                        let list_base_row = ui.text_style_height(&egui::TextStyle::Body).max(24.0);
+                        let list_icon_size = (list_base_row + 2.0) * 1.3;
+                        let list_row_height = (list_icon_size + 4.0).max(list_base_row + 4.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(left_w, panel_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.label("Results");
+                                ui.separator();
+                                egui::ScrollArea::vertical()
+                                    .id_salt("download_curseforge_results_scroll")
+                                    .max_height(panel_height)
+                                    .show_rows(
+                                        ui,
+                                        list_row_height,
+                                        self.curseforge_hits.len(),
+                                        |ui, row_range| {
+                                            row_end = row_range.end;
+                                            for idx in row_range {
+                                                let (icon_url, label) = {
+                                                    let hit = &self.curseforge_hits[idx];
+                                                    let mut label = hit.title.clone();
+                                                    if !hit.author.trim().is_empty() {
+                                                        label.push_str(&format!(" ({})", hit.author));
+                                                    }
+                                                    (hit.icon_url.clone(), label)
+                                                };
+                                                let selected =
+                                                    self.selected_curseforge_hit == Some(idx);
+                                                let row_resp = ui
+                                                    .horizontal(|ui| {
+                                                        if let Some(icon) = &icon_url {
+                                                            if let Some(tex) = self
+                                                                .ensure_icon_texture_from_source(
+                                                                    ui.ctx(),
+                                                                    icon,
+                                                                )
+                                                            {
+                                                                ui.image((
+                                                                    tex.id(),
+                                                                    egui::vec2(
+                                                                        list_icon_size,
+                                                                        list_icon_size,
+                                                                    ),
+                                                                ));
+                                                            } else {
+                                                                ui.add_space(list_icon_size);
+                                                            }
+                                                        } else {
+                                                            ui.add_space(list_icon_size);
+                                                        }
+                                                        let text_width = ui.available_width().max(80.0);
+                                                        let max_chars =
+                                                            ((text_width / 9.0).floor() as usize)
+                                                                .max(12);
+                                                        let label_short =
+                                                            truncate_with_ellipsis(&label, max_chars);
+                                                        let response = ui.add_sized(
+                                                            [text_width, list_row_height],
+                                                            egui::Button::new(
+                                                                egui::RichText::new(label_short)
+                                                                    .size(list_font_size),
+                                                            )
+                                                            .selected(selected)
+                                                            .frame(false),
+                                                        );
+                                                        if response.clicked() {
+                                                            pending_select = Some(idx);
+                                                        }
+                                                        if response.double_clicked() {
+                                                            pending_queue = Some(idx);
+                                                        }
+                                                    })
+                                                    .response;
+                                                if row_resp.clicked() {
+                                                    pending_select = Some(idx);
                                                 }
-                                            } else {
-                                                ui.add_space(row_h);
+                                                if row_resp.double_clicked() {
+                                                    pending_queue = Some(idx);
+                                                }
                                             }
-                                            let response = ui.selectable_label(selected, label);
-                                            if response.clicked() {
-                                                pending_select = Some(idx);
-                                            }
-                                            if response.double_clicked() {
-                                                pending_queue = Some(idx);
-                                            }
-                                        });
-                                    }
-                                },
-                            );
+                                        },
+                                    );
+                            },
+                        );
                         if let Some(idx) = pending_select {
                             self.selected_curseforge_hit = Some(idx);
                             self.request_selected_download_details();
@@ -3662,32 +6537,51 @@ impl PrismarineApp {
                         {
                             self.start_download_search(true);
                         }
-                        if self.download_search_loading {
-                            cols[0].label("Loading...");
-                        }
-                        cols[1].label("Описание");
-                        cols[1].separator();
-                        if let Some(icon) = self.download_details.icon_url.clone() {
-                            if let Some(tex) =
-                                self.ensure_icon_texture_from_source(cols[1].ctx(), &icon)
-                            {
-                                cols[1].image((tex.id(), egui::vec2(56.0, 56.0)));
-                            }
-                        }
-                        if !self.download_details.title.is_empty() {
-                            cols[1].heading(&self.download_details.title);
-                        }
-                        if self.download_details.markdown.trim().is_empty() {
-                            cols[1].label("Проект не выбран");
-                        } else {
-                            cols[1].push_id("curseforge_markdown_panel", |ui| {
-                                egui_commonmark::CommonMarkViewer::new().show(
-                                    ui,
-                                    &mut self.markdown_cache_curseforge,
-                                    &self.download_details.markdown,
-                                );
-                            });
-                        }
+                        ui.add_space(split_gap);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(right_w, panel_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                if self.download_search_loading {
+                                    ui.label("Loading...");
+                                } else if self.curseforge_hits.is_empty() {
+                                    ui.label("No results");
+                                }
+                                ui.label("Description");
+                                ui.separator();
+                                let details_icon = self.download_details.icon_url.clone();
+                                egui::ScrollArea::vertical()
+                                    .id_salt("download_curseforge_description_scroll")
+                                    .max_height(panel_height)
+                                    .show(ui, |ui| {
+                                        if let Some(icon) = details_icon.as_deref()
+                                            && let Some(tex) = self
+                                                .ensure_icon_texture_from_source(ui.ctx(), icon)
+                                        {
+                                            ui.image((tex.id(), egui::vec2(56.0, 56.0)));
+                                        }
+                                        if !self.download_details.title.is_empty() {
+                                            ui.heading(&self.download_details.title);
+                                        }
+                                        if self.download_details.markdown.trim().is_empty() {
+                                            ui.label("No project selected");
+                                        } else {
+                                            let max_img_w = (ui.available_width() - 28.0)
+                                                .clamp(96.0, 260.0)
+                                                as usize;
+                                            ui.push_id("curseforge_markdown_panel", |ui| {
+                                                egui_commonmark::CommonMarkViewer::new()
+                                                    .max_image_width(Some(max_img_w))
+                                                    .show(
+                                                        ui,
+                                                        &mut self.markdown_cache_curseforge,
+                                                        &self.download_details.markdown,
+                                                    );
+                                            });
+                                        }
+                                    });
+                            },
+                        );
                     });
                 }
             }
@@ -3739,55 +6633,62 @@ impl PrismarineApp {
     }
 
     fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Параметры");
-        ui.horizontal(|ui| {
-            if ui.button("Открыть глобальные параметры").clicked() {
-                self.status = "Глобальные параметры уже открыты справа.".to_string();
-            }
-            ui.label("Эти параметры переопределяют настройки экземпляра.");
-        });
-        ui.separator();
-
+        ui.heading("Settings");
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::General, "Общие");
+            ui.label("Scope:");
+            ui.selectable_value(&mut self.settings_target, SettingsTarget::Global, "Global");
+            ui.selectable_value(
+                &mut self.settings_target,
+                SettingsTarget::Instance,
+                "Selected Instance",
+            );
+            ui.separator();
+            ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::General, "General");
             ui.selectable_value(&mut self.settings_subtab, SettingsSubTab::Java, "Java");
             ui.selectable_value(
                 &mut self.settings_subtab,
                 SettingsSubTab::Launch,
-                "Настройки",
+                "Launch",
             );
             ui.selectable_value(
                 &mut self.settings_subtab,
                 SettingsSubTab::UserCommands,
-                "Пользовательские команды",
+                "User Commands",
             );
             ui.selectable_value(
                 &mut self.settings_subtab,
                 SettingsSubTab::Environment,
-                "Переменные окружения",
+                "Environment Variables",
             );
         });
         ui.separator();
 
-        let mut changed = false;
+        if self.settings_target == SettingsTarget::Global {
+            self.draw_global_settings_ui(ui);
+        } else {
+            self.draw_instance_settings_ui(ui);
+        }
+    }
 
+    fn draw_global_settings_ui(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
         match self.settings_subtab {
             SettingsSubTab::General => {
                 ui.group(|ui| {
-                    ui.label(format!("Хранилище: {}", self.data_root.display()));
-                    ui.label(format!("Экземпляры: {}", self.instance_root().display()));
+                    ui.label(format!("Storage: {}", self.data_root.display()));
+                    ui.label(format!("Instances: {}", self.instance_root().display()));
                     ui.label(
-                        "Все аккаунты и экземпляры хранятся в ~/.local/share/PrismarineLauncher.",
+                        "All accounts and instances are stored in ~/.local/share/PrismarineLauncher.",
                     );
                 });
                 ui.add_space(8.0);
                 ui.group(|ui| {
-                    ui.label("Режим настроек запуска");
+                    ui.label("Launch settings mode");
                     changed |= ui
                         .selectable_value(
                             &mut self.global_settings.mode,
                             LaunchSettingsMode::Basic,
-                            "Обычные",
+                            "Basic",
                         )
                         .changed();
                     changed |= ui
@@ -3797,40 +6698,40 @@ impl PrismarineApp {
                             "Advanced",
                         )
                         .changed();
-                    ui.label("В обычном режиме доступны минимальная/максимальная память.");
+                    ui.label("Global defaults for new and unknown instances.");
                 });
             }
             SettingsSubTab::Java => {
                 ui.group(|ui| {
-                    ui.label("Установка Java");
-                    ui.label("Исполняемый файл Java");
+                    ui.label("Global Java setup");
+                    ui.label("Java executable");
                     changed |= ui
                         .text_edit_singleline(&mut self.global_settings.java_path)
                         .changed();
                     ui.horizontal(|ui| {
-                        if ui.button("Найти").clicked() {
+                        if ui.button("Find").clicked() {
                             self.do_find_java();
                         }
-                        if ui.button("Обзор").clicked() {
+                        if ui.button("Browse").clicked() {
                             self.do_browse_java();
                         }
                     });
                     changed |= ui
                         .checkbox(
                             &mut self.global_settings.skip_java_compat_check,
-                            "Пропустить проверку совместимости Java",
+                            "Skip Java compatibility checks",
                         )
                         .changed();
-                    if ui.button("Проверить настройки").clicked() {
+                    if ui.button("Check settings").clicked() {
                         self.do_check_java_settings();
                     }
                 });
             }
             SettingsSubTab::Launch => {
                 ui.group(|ui| {
-                    ui.label("Память");
+                    ui.label("Memory");
                     ui.horizontal(|ui| {
-                        ui.label("Минимальное использование памяти:");
+                        ui.label("Minimum memory:");
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut self.global_settings.min_memory_mb)
@@ -3841,7 +6742,7 @@ impl PrismarineApp {
                         ui.label("MiB (-Xms)");
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Максимальное использование памяти:");
+                        ui.label("Maximum memory:");
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut self.global_settings.max_memory_mb)
@@ -3852,7 +6753,7 @@ impl PrismarineApp {
                         ui.label("MiB (-Xmx)");
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Размер PermGen:");
+                        ui.label("PermGen size:");
                         changed |= ui
                             .add(
                                 egui::DragValue::new(&mut self.global_settings.permgen_mb)
@@ -3869,19 +6770,19 @@ impl PrismarineApp {
                 });
                 ui.add_space(8.0);
                 ui.group(|ui| {
-                    ui.label("Аргументы Java");
+                    ui.label("Java arguments");
                     changed |= ui
                         .add(
                             egui::TextEdit::multiline(&mut self.global_settings.advanced_jvm_args)
                                 .desired_rows(8),
                         )
                         .changed();
-                    ui.label("Используются в режиме Advanced.");
+                    ui.label("Used in Advanced mode.");
                 });
             }
             SettingsSubTab::UserCommands => {
                 ui.group(|ui| {
-                    ui.label("Пользовательские команды (по одной на строку)");
+                    ui.label("User commands (one per line)");
                     changed |= ui
                         .add(
                             egui::TextEdit::multiline(&mut self.global_settings.user_commands)
@@ -3892,7 +6793,7 @@ impl PrismarineApp {
             }
             SettingsSubTab::Environment => {
                 ui.group(|ui| {
-                    ui.label("Переменные окружения (формат KEY=VALUE, по одной на строку)");
+                    ui.label("Environment variables (KEY=VALUE, one per line)");
                     changed |= ui
                         .add(
                             egui::TextEdit::multiline(&mut self.global_settings.environment_vars)
@@ -3902,13 +6803,513 @@ impl PrismarineApp {
                 });
             }
         }
-
         if changed {
             save_global_settings(&self.global_settings);
         }
     }
 
+    fn draw_instance_settings_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(instance_path) = self.selected_instance_path() else {
+            ui.label("Select instance first.");
+            return;
+        };
+        let Some(instance) = self.selected_instance().cloned() else {
+            ui.label("Select instance first.");
+            return;
+        };
+        let mut cfg = load_prism_instance_config(&instance_path).unwrap_or_default();
+        let mut changed = false;
+
+        ui.group(|ui| {
+            ui.label(format!("Instance: {}", instance.name));
+            ui.label("Fallback values are taken from Global settings when override is disabled.");
+        });
+        ui.add_space(8.0);
+
+        match self.settings_subtab {
+            SettingsSubTab::General => {
+                ui.group(|ui| {
+                    ui.label("Instance overrides");
+                    changed |= ui
+                        .checkbox(&mut cfg.override_java_location, "Override Java executable")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut cfg.override_java_args, "Override Java arguments")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut cfg.override_memory, "Override memory limits")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut cfg.override_commands, "Override launch commands")
+                        .changed();
+                });
+                ui.add_space(8.0);
+                ui.group(|ui| {
+                    let current_loader = self.detect_instance_loader(&instance_path);
+                    let current_text = if current_loader.trim().is_empty() {
+                        "Vanilla".to_string()
+                    } else {
+                        match current_loader.as_str() {
+                            "fabric" => "Fabric".to_string(),
+                            "forge" => "Forge".to_string(),
+                            "quilt" => "Quilt".to_string(),
+                            "neoforge" => "Neo-Forge".to_string(),
+                            other => other.to_string(),
+                        }
+                    };
+                    ui.label(format!("Current loader: {current_text}"));
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Vanilla").clicked() {
+                            self.do_set_selected_instance_loader(None);
+                        }
+                        if ui.button("Fabric").clicked() {
+                            self.do_set_selected_instance_loader(Some(CreateLoader::Fabric));
+                        }
+                        if ui.button("Forge").clicked() {
+                            self.do_set_selected_instance_loader(Some(CreateLoader::Forge));
+                        }
+                        if ui.button("Quilt").clicked() {
+                            self.do_set_selected_instance_loader(Some(CreateLoader::Quilt));
+                        }
+                        if ui.button("Neo-Forge").clicked() {
+                            self.do_set_selected_instance_loader(Some(CreateLoader::NeoForge));
+                        }
+                    });
+                });
+            }
+            SettingsSubTab::Java => {
+                ui.group(|ui| {
+                    changed |= ui
+                        .checkbox(&mut cfg.override_java_location, "Use custom Java for this instance")
+                        .changed();
+                    if cfg.override_java_location {
+                        let java = cfg.java_path.get_or_insert_with(String::new);
+                        changed |= ui.text_edit_singleline(java).changed();
+                        ui.horizontal(|ui| {
+                            if ui.button("Find").clicked() {
+                                let mut seen = HashSet::new();
+                                for candidate in Self::discover_java_candidates() {
+                                    if !candidate.exists() {
+                                        continue;
+                                    }
+                                    let key = candidate.display().to_string();
+                                    if !seen.insert(key.clone()) {
+                                        continue;
+                                    }
+                                    if let Some(version) = Self::probe_java_runtime(&candidate) {
+                                        cfg.java_path = Some(key.clone());
+                                        changed = true;
+                                        self.status =
+                                            format!("Instance Java found for {}: {version}", instance.name);
+                                        break;
+                                    }
+                                }
+                            }
+                            if ui.button("Browse").clicked() {
+                                let mut dialog =
+                                    rfd::FileDialog::new().set_title("Select Java executable");
+                                if let Ok(home) = std::env::var("HOME") {
+                                    dialog = dialog.set_directory(home);
+                                }
+                                if let Some(path) = dialog.pick_file() {
+                                    cfg.java_path = Some(path.display().to_string());
+                                    changed = true;
+                                }
+                            }
+                        });
+                    }
+                    ui.separator();
+                    changed |= ui
+                        .checkbox(
+                            &mut cfg.override_java_args,
+                            "Use custom JVM args for this instance",
+                        )
+                        .changed();
+                    if cfg.override_java_args {
+                        let args = cfg.java_args.get_or_insert_with(String::new);
+                        changed |= ui
+                            .add(egui::TextEdit::multiline(args).desired_rows(6))
+                            .changed();
+                    }
+                });
+            }
+            SettingsSubTab::Launch => {
+                ui.group(|ui| {
+                    changed |= ui
+                        .checkbox(&mut cfg.override_memory, "Use custom memory for this instance")
+                        .changed();
+                    if cfg.override_memory {
+                        let min = cfg.min_mem_alloc.get_or_insert(512);
+                        let max = cfg.max_mem_alloc.get_or_insert(4096);
+                        let perm = cfg.perm_gen.get_or_insert(128);
+                        ui.horizontal(|ui| {
+                            ui.label("Minimum memory:");
+                            changed |= ui
+                                .add(egui::DragValue::new(min).speed(64).range(256..=131072))
+                                .changed();
+                            ui.label("MiB (-Xms)");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Maximum memory:");
+                            changed |= ui
+                                .add(egui::DragValue::new(max).speed(64).range(256..=131072))
+                                .changed();
+                            ui.label("MiB (-Xmx)");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("PermGen size:");
+                            changed |= ui
+                                .add(egui::DragValue::new(perm).speed(16).range(0..=4096))
+                                .changed();
+                            ui.label("MiB (-XX:PermSize)");
+                        });
+                        if *max < *min {
+                            *max = *min;
+                            changed = true;
+                        }
+                    }
+                });
+            }
+            SettingsSubTab::UserCommands => {
+                ui.group(|ui| {
+                    changed |= ui
+                        .checkbox(
+                            &mut cfg.override_commands,
+                            "Use custom commands for this instance",
+                        )
+                        .changed();
+                    if cfg.override_commands {
+                        ui.label("Pre-launch command");
+                        let pre = cfg.pre_launch_command.get_or_insert_with(String::new);
+                        changed |= ui.text_edit_singleline(pre).changed();
+                        ui.label("Post-exit command");
+                        let post = cfg.post_exit_command.get_or_insert_with(String::new);
+                        changed |= ui.text_edit_singleline(post).changed();
+                        ui.label("Wrapper command");
+                        let wrap = cfg.wrapper_command.get_or_insert_with(String::new);
+                        changed |= ui.text_edit_singleline(wrap).changed();
+                    }
+                });
+            }
+            SettingsSubTab::Environment => {
+                ui.group(|ui| {
+                    ui.label("Per-instance environment variables are not supported yet.");
+                    ui.label("Use Global -> Environment Variables.");
+                });
+            }
+        }
+
+        if changed {
+            match save_instance_launch_overrides(&instance_path, &cfg) {
+                Ok(_) => {
+                    self.status = format!("Saved instance settings: {}", instance.name);
+                }
+                Err(err) => {
+                    self.status = format!("Failed to save instance settings: {err}");
+                }
+            }
+        }
+    }
+
     fn draw_dialogs(&mut self, ctx: &egui::Context) {
+        if self.show_version_update_dialog {
+            egui::Window::new("Launcher Updated")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .default_width(540.0)
+                .show(ctx, |ui| {
+                    let current = launcher_version_string();
+                    ui.heading("You updated to a new version");
+                    ui.separator();
+                    if let Some(prev) = &self.previous_launcher_version {
+                        ui.label(format!("Previous version: {prev}"));
+                    }
+                    ui.label(format!("Current version: {current}"));
+                    ui.label("Version format: major.build (for example 1.0000001).");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            self.show_version_update_dialog = false;
+                            self.previous_launcher_version = None;
+                            self.last_seen_launcher_version = current;
+                        }
+                    });
+                });
+        }
+
+        if self.show_set_icon_dialog {
+            let target_path = self.set_icon_target_instance_path.clone();
+            let target_idx = target_path
+                .as_ref()
+                .and_then(|p| self.instances.iter().position(|i| &i.path == p));
+            if target_idx.is_none() {
+                self.show_set_icon_dialog = false;
+                self.set_icon_target_instance_path = None;
+            } else {
+                let target_idx = target_idx.unwrap_or(0);
+                let target_name = self.instances[target_idx].name.clone();
+                let target_instance_path = self.instances[target_idx].path.clone();
+                let other_icons: Vec<(String, String)> = self
+                    .instances
+                    .iter()
+                    .filter(|i| i.path != target_instance_path)
+                    .filter_map(|i| i.icon_path.clone().map(|p| (i.name.clone(), p)))
+                    .collect();
+                let custom_icons = self.list_custom_icon_files();
+                let mut choose_builtin: Option<(&'static str, &'static str, &'static [u8])> = None;
+                let mut choose_other_icon: Option<String> = None;
+                let mut choose_custom_key: Option<String> = None;
+                let mut choose_default = false;
+                let mut import_custom = false;
+
+                egui::Window::new("Set Instance Icon")
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(860.0)
+                    .default_height(620.0)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Instance:");
+                            ui.monospace(&target_name);
+                        });
+                        ui.separator();
+
+                        ui.columns(2, |cols| {
+                            cols[0].set_min_width(190.0);
+                            cols[0].selectable_value(
+                                &mut self.set_icon_dialog_section,
+                                0,
+                                "Built-in Icons",
+                            );
+                            cols[0].separator();
+                            cols[0].selectable_value(
+                                &mut self.set_icon_dialog_section,
+                                1,
+                                "Icons From Other Instances",
+                            );
+                            cols[0].separator();
+                            cols[0].selectable_value(
+                                &mut self.set_icon_dialog_section,
+                                2,
+                                "Custom Icons",
+                            );
+
+                            match self.set_icon_dialog_section {
+                                0 => {
+                                    cols[1].heading("Built-in Icons");
+                                    cols[1].separator();
+                                    if cols[1].button("Use Default").clicked() {
+                                        choose_default = true;
+                                    }
+                                    cols[1].separator();
+                                    egui::Grid::new("set_icon_builtin_grid")
+                                        .num_columns(3)
+                                        .spacing([16.0, 14.0])
+                                        .show(&mut cols[1], |ui| {
+                                            let builtins = [
+                                                (
+                                                    "Vanilla",
+                                                    "set_icon_builtin_vanilla",
+                                                    include_bytes!("../ui/assets/loader_icons/vanilla.png")
+                                                        .as_slice(),
+                                                ),
+                                                (
+                                                    "Fabric",
+                                                    "set_icon_builtin_fabric",
+                                                    include_bytes!("../ui/assets/loader_icons/fabric.png")
+                                                        .as_slice(),
+                                                ),
+                                                (
+                                                    "Forge",
+                                                    "set_icon_builtin_forge",
+                                                    include_bytes!("../ui/assets/loader_icons/forge.png")
+                                                        .as_slice(),
+                                                ),
+                                                (
+                                                    "Quilt",
+                                                    "set_icon_builtin_quilt",
+                                                    include_bytes!("../ui/assets/loader_icons/quilt.png")
+                                                        .as_slice(),
+                                                ),
+                                                (
+                                                    "NeoForge",
+                                                    "set_icon_builtin_neoforge",
+                                                    include_bytes!("../ui/assets/loader_icons/neoforge.png")
+                                                        .as_slice(),
+                                                ),
+                                            ];
+                                            for (idx, (title, key, bytes)) in
+                                                builtins.into_iter().enumerate()
+                                            {
+                                                ui.vertical_centered(|ui| {
+                                                    if let Some(tex) = self
+                                                        .ensure_builtin_icon_texture(ui.ctx(), key, bytes)
+                                                        && ui
+                                                            .add(
+                                                                egui::Button::image((
+                                                                    tex.id(),
+                                                                    egui::vec2(40.0, 40.0),
+                                                                )),
+                                                            )
+                                                            .clicked()
+                                                    {
+                                                        choose_builtin = Some((title, key, bytes));
+                                                    }
+                                                    if ui.button(title).clicked() {
+                                                        choose_builtin = Some((title, key, bytes));
+                                                    }
+                                                });
+                                                if idx % 3 == 2 {
+                                                    ui.end_row();
+                                                }
+                                            }
+                                        });
+                                }
+                                1 => {
+                                    cols[1].heading("Icons From Other Instances");
+                                    cols[1].separator();
+                                    if other_icons.is_empty() {
+                                        cols[1].label("No other instance icons found");
+                                    } else {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("set_icon_other_instances_scroll")
+                                            .show(&mut cols[1], |ui| {
+                                                egui::Grid::new("set_icon_other_grid")
+                                                    .num_columns(4)
+                                                    .spacing([14.0, 12.0])
+                                                    .show(ui, |ui| {
+                                                        for (idx, (name, icon_path)) in
+                                                            other_icons.iter().enumerate()
+                                                        {
+                                                            ui.vertical_centered(|ui| {
+                                                                if let Some(tex) = self
+                                                                    .ensure_icon_texture(
+                                                                        ui.ctx(),
+                                                                        icon_path,
+                                                                    )
+                                                                    && ui
+                                                                        .add(egui::Button::image((
+                                                                            tex.id(),
+                                                                            egui::vec2(40.0, 40.0),
+                                                                        )))
+                                                                        .clicked()
+                                                                {
+                                                                    choose_other_icon =
+                                                                        Some(icon_path.clone());
+                                                                }
+                                                                if ui.button(name).clicked() {
+                                                                    choose_other_icon =
+                                                                        Some(icon_path.clone());
+                                                                }
+                                                            });
+                                                            if idx % 4 == 3 {
+                                                                ui.end_row();
+                                                            }
+                                                        }
+                                                    });
+                                            });
+                                    }
+                                }
+                                _ => {
+                                    cols[1].heading("Custom Icons");
+                                    cols[1].separator();
+                                    if cols[1].button("Import Custom Icon...").clicked() {
+                                        import_custom = true;
+                                    }
+                                    cols[1].separator();
+                                    if custom_icons.is_empty() {
+                                        cols[1].label("No custom icons in icon store");
+                                    } else {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("set_icon_custom_scroll")
+                                            .show(&mut cols[1], |ui| {
+                                                egui::Grid::new("set_icon_custom_grid")
+                                                    .num_columns(4)
+                                                    .spacing([14.0, 12.0])
+                                                    .show(ui, |ui| {
+                                                        for (idx, icon_path) in
+                                                            custom_icons.iter().enumerate()
+                                                        {
+                                                            let name = Path::new(icon_path)
+                                                                .file_stem()
+                                                                .and_then(|x| x.to_str())
+                                                                .unwrap_or("custom")
+                                                                .to_string();
+                                                            ui.vertical_centered(|ui| {
+                                                                if let Some(tex) = self
+                                                                    .ensure_icon_texture(
+                                                                        ui.ctx(),
+                                                                        icon_path,
+                                                                    )
+                                                                    && ui
+                                                                        .add(egui::Button::image((
+                                                                            tex.id(),
+                                                                            egui::vec2(40.0, 40.0),
+                                                                        )))
+                                                                        .clicked()
+                                                                {
+                                                                    choose_custom_key =
+                                                                        Some(name.clone());
+                                                                }
+                                                                if ui.button(&name).clicked() {
+                                                                    choose_custom_key =
+                                                                        Some(name.clone());
+                                                                }
+                                                            });
+                                                            if idx % 4 == 3 {
+                                                                ui.end_row();
+                                                            }
+                                                        }
+                                                    });
+                                            });
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Close").clicked() {
+                                self.show_set_icon_dialog = false;
+                            }
+                        });
+                    });
+
+                if choose_default {
+                    self.apply_instance_icon_key(&target_instance_path, None);
+                    self.show_set_icon_dialog = false;
+                } else if let Some((title, key, bytes)) = choose_builtin {
+                    let built_key = format!("builtin_{}", title.to_ascii_lowercase());
+                    if let Some(saved_key) =
+                        self.write_builtin_icon_to_store(&built_key, "png", bytes)
+                    {
+                        self.apply_instance_icon_key(&target_instance_path, Some(&saved_key));
+                        self.show_set_icon_dialog = false;
+                    } else {
+                        self.status = "Failed to write built-in icon".to_string();
+                    }
+                    let _ = key;
+                } else if let Some(other_icon_path) = choose_other_icon {
+                    if let Some(icon_key) = copy_image_to_icon_store(
+                        &self.data_root,
+                        Path::new(&other_icon_path),
+                        &target_name,
+                    ) {
+                        self.apply_instance_icon_key(&target_instance_path, Some(&icon_key));
+                        self.show_set_icon_dialog = false;
+                    } else {
+                        self.status = "Failed to copy icon from another instance".to_string();
+                    }
+                } else if let Some(custom_key) = choose_custom_key {
+                    self.apply_instance_icon_key(&target_instance_path, Some(&custom_key));
+                    self.show_set_icon_dialog = false;
+                } else if import_custom {
+                    self.import_custom_instance_icon();
+                }
+            }
+        }
+
         if self.show_create_dialog {
             egui::Window::new("Create Instance")
                 .collapsible(false)
@@ -3916,12 +7317,8 @@ impl PrismarineApp {
                 .default_width(760.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Имя:");
+                        ui.label("Name:");
                         ui.text_edit_singleline(&mut self.create_name);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Группа:");
-                        ui.label("Без группы");
                     });
                     ui.separator();
                     ui.columns(2, |cols| {
@@ -3929,31 +7326,34 @@ impl PrismarineApp {
                         cols[0].selectable_value(
                             &mut self.create_mode,
                             CreateMode::Custom,
-                            "Пользовательский",
+                            "Custom",
                         );
                         cols[0].selectable_value(
                             &mut self.create_mode,
                             CreateMode::Import,
-                            "Импорт",
+                            "Import",
                         );
 
                         cols[1].heading(match self.create_mode {
-                            CreateMode::Custom => "Пользовательский",
-                            CreateMode::Import => "Импорт",
+                            CreateMode::Custom => "Custom",
+                            CreateMode::Import => "Import",
                         });
                         cols[1].separator();
                         match self.create_mode {
                             CreateMode::Custom => {
-                                cols[1].label("Версия (обязательно):");
+                                cols[1].label("Version (required):");
                                 let _ =
                                     cols[1].text_edit_singleline(&mut self.create_game_version);
+                                cols[1].label(
+                                    "Supported loaders: Vanilla, Fabric, Forge, Quilt, Neo-Forge",
+                                );
                                 cols[1].horizontal(|ui| {
                                     if self.create_versions_loading {
-                                        ui.label("Загрузка списка версий...");
+                                        ui.label("Loading version list...");
                                     } else {
-                                        ui.label("Подсказки версий:");
+                                        ui.label("Version suggestions:");
                                     }
-                                    if ui.button("Обновить").clicked() {
+                                    if ui.button("Refresh").clicked() {
                                         self.request_create_versions();
                                     }
                                 });
@@ -3980,7 +7380,7 @@ impl PrismarineApp {
                                             }
                                         });
                                 }
-                                cols[1].label("Загрузчик модов (опционально):");
+                                cols[1].label("Mod loader (optional):");
                                 egui::ComboBox::from_id_salt("create_loader")
                                     .selected_text(
                                         self.create_loader
@@ -3989,49 +7389,67 @@ impl PrismarineApp {
                                             .unwrap_or("Vanilla (no loader)"),
                                     )
                                     .show_ui(&mut cols[1], |ui| {
-                                        ui.selectable_value(
-                                            &mut self.create_loader,
-                                            None,
-                                            "Vanilla (no loader)",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.create_loader,
-                                            Some(CreateLoader::Fabric),
-                                            "Fabric",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.create_loader,
-                                            Some(CreateLoader::Forge),
-                                            "Forge",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.create_loader,
-                                            Some(CreateLoader::Quilt),
-                                            "Quilt",
-                                        );
-                                        ui.selectable_value(
-                                            &mut self.create_loader,
-                                            Some(CreateLoader::NeoForge),
-                                            "Neo-Forge",
-                                        );
+                                        ui.horizontal(|ui| {
+                                            if let Some(tex) =
+                                                self.ensure_loader_icon_texture(ui.ctx(), "vanilla")
+                                            {
+                                                ui.image((tex.id(), egui::vec2(16.0, 16.0)));
+                                            }
+                                            ui.selectable_value(
+                                                &mut self.create_loader,
+                                                None,
+                                                "Vanilla (no loader)",
+                                            );
+                                        });
+                                        for loader in [
+                                            CreateLoader::Fabric,
+                                            CreateLoader::Forge,
+                                            CreateLoader::Quilt,
+                                            CreateLoader::NeoForge,
+                                        ] {
+                                            ui.horizontal(|ui| {
+                                                if let Some(tex) = self
+                                                    .ensure_create_loader_icon_texture(ui.ctx(), &loader)
+                                                {
+                                                    ui.image((tex.id(), egui::vec2(16.0, 16.0)));
+                                                }
+                                                ui.selectable_value(
+                                                    &mut self.create_loader,
+                                                    Some(loader.clone()),
+                                                    loader.label(),
+                                                );
+                                            });
+                                        }
                                     });
                             }
                             CreateMode::Import => {
-                                cols[1].label("Архив сборки (.mrpack или .zip):");
+                                cols[1].label("Pack archive (.mrpack or .zip):");
                                 cols[1].horizontal(|ui| {
                                     ui.text_edit_singleline(&mut self.create_import_path);
-                                    if ui.button("Обзор").clicked() {
+                                    if ui.button("Browse").clicked() {
                                         self.do_browse_import_archive();
                                     }
                                 });
+                                if let Some(progress) = &self.import_progress {
+                                    cols[1].separator();
+                                    cols[1].label(progress.message.as_str());
+                                    let total = progress.total.max(1) as f32;
+                                    let value = (progress.done as f32 / total).clamp(0.0, 1.0);
+                                    cols[1].add(
+                                        egui::ProgressBar::new(value)
+                                            .desired_width(cols[1].available_width()),
+                                    );
+                                    cols[1].monospace(format!("{}/{}", progress.done, progress.total));
+                                }
                                 cols[1].label(
-                                    "Поддержка импорта: только .mrpack и .zip (без FTB/CurseForge/Modrinth API).",
+                                    "Import support: only .mrpack and .zip (no FTB/CurseForge/Modrinth API).",
                                 );
                             }
                         }
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
+                        let can_submit = self.import_worker_rx.is_none();
+                        if ui.add_enabled(can_submit, egui::Button::new("OK")).clicked() {
                             match self.create_mode {
                                 CreateMode::Custom => self.do_create_instance(),
                                 CreateMode::Import => self.do_import_instance(),
@@ -4057,6 +7475,50 @@ impl PrismarineApp {
                         }
                         if ui.button("Cancel").clicked() {
                             self.show_rename_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        if self.show_create_group_dialog {
+            egui::Window::new("Create Group")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Group name:");
+                        ui.text_edit_singleline(&mut self.create_group_name);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() {
+                            self.do_create_group();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_create_group_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        if self.show_rename_group_dialog {
+            egui::Window::new("Rename Group")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Old:");
+                        ui.text_edit_singleline(&mut self.rename_group_old);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("New:");
+                        ui.text_edit_singleline(&mut self.rename_group_new);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Rename").clicked() {
+                            self.do_rename_group();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_rename_group_dialog = false;
                         }
                     });
                 });
@@ -4096,6 +7558,147 @@ impl PrismarineApp {
                         }
                         if ui.button("Cancel").clicked() {
                             self.show_delete_dialog = false;
+                        }
+                    });
+                });
+        }
+
+        if self.show_manage_accounts_dialog {
+            egui::Window::new("Accounts")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(760.0)
+                .default_height(520.0)
+                .show(ctx, |ui| {
+                    ui.columns(2, |cols| {
+                        cols[0].set_min_width(430.0);
+                        cols[0].horizontal(|ui| {
+                            ui.label("Username");
+                            ui.add_space(72.0);
+                            ui.label("Type");
+                            ui.add_space(50.0);
+                            ui.label("Status");
+                        });
+                        cols[0].separator();
+                        egui::ScrollArea::vertical()
+                            .id_salt("accounts_manage_scroll")
+                            .show(&mut cols[0], |ui| {
+                                for idx in 0..self.accounts.len() {
+                                    let selected = self.manage_account_selected == Some(idx);
+                                    let account = self.accounts[idx].clone();
+                                    let account_type = match account.account_type {
+                                        AccountType::Licensed => "Microsoft Account",
+                                        AccountType::Offline => "Offline",
+                                    };
+                                    let status = if account.active {
+                                        "Ready"
+                                    } else if account.account_type == AccountType::Licensed
+                                        && !account.licensed
+                                    {
+                                        "No license"
+                                    } else {
+                                        ""
+                                    };
+                                    ui.horizontal(|ui| {
+                                        let active_mark = if account.active { "✓" } else { " " };
+                                        ui.monospace(active_mark);
+                                        if account.account_type == AccountType::Offline {
+                                            let tex = self.ensure_offline_head_texture(ui.ctx());
+                                            ui.image((tex.id(), egui::vec2(18.0, 18.0)));
+                                        } else if let Some(head_path) =
+                                            self.ensure_account_head_cached_async(&account.name)
+                                        {
+                                            if let Some(tex) =
+                                                self.ensure_icon_texture(ui.ctx(), &head_path)
+                                            {
+                                                ui.image((tex.id(), egui::vec2(18.0, 18.0)));
+                                            } else {
+                                                ui.add_space(18.0);
+                                            }
+                                        } else {
+                                            ui.add_space(18.0);
+                                        }
+                                        let label = format!(
+                                            "{:<20}  {:<24}  {}",
+                                            account.name, account_type, status
+                                        );
+                                        if ui.selectable_label(selected, label).clicked() {
+                                            self.manage_account_selected = Some(idx);
+                                        }
+                                    });
+                                }
+                            });
+
+                        cols[1].heading("Account Management");
+                        cols[1].separator();
+                        if cols[1].button("Login via Microsoft").clicked() {
+                            self.show_add_account_dialog = true;
+                            self.do_start_device_code_login();
+                        }
+                        cols[1].horizontal(|ui| {
+                            ui.label("Add offline:");
+                            ui.text_edit_singleline(&mut self.new_offline_account_name);
+                        });
+                        if cols[1].button("Add offline").clicked() {
+                            self.add_offline_account();
+                        }
+                        cols[1].separator();
+                        let selected_ok = self
+                            .manage_account_selected
+                            .map(|i| i < self.accounts.len())
+                            .unwrap_or(false);
+                        if cols[1]
+                            .add_enabled(selected_ok, egui::Button::new("Refresh"))
+                            .clicked()
+                        {
+                            self.refresh_selected_account();
+                        }
+                        if cols[1]
+                            .add_enabled(selected_ok, egui::Button::new("Delete"))
+                            .clicked()
+                        {
+                            self.delete_selected_account();
+                        }
+                        if cols[1]
+                            .add_enabled(selected_ok, egui::Button::new("Set as default"))
+                            .clicked()
+                            && let Some(idx) = self.manage_account_selected
+                        {
+                            self.set_active_account(idx);
+                        }
+                        if cols[1].button("Do not use by default").clicked() {
+                            self.clear_active_account();
+                        }
+                        if cols[1]
+                            .add_enabled(selected_ok, egui::Button::new("Move up"))
+                            .clicked()
+                        {
+                            self.move_selected_account(-1);
+                        }
+                        if cols[1]
+                            .add_enabled(selected_ok, egui::Button::new("Move down"))
+                            .clicked()
+                        {
+                            self.move_selected_account(1);
+                        }
+                        if cols[1]
+                            .add_enabled(selected_ok, egui::Button::new("Skin management"))
+                            .clicked()
+                        {
+                            self.status = "Skin management is not implemented yet".to_string();
+                        }
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            self.show_manage_accounts_dialog = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_manage_accounts_dialog = false;
+                        }
+                        if ui.button("Help").clicked() {
+                            self.status = "Account management: select an account and an action on the right."
+                                .to_string();
                         }
                     });
                 });
@@ -4191,16 +7794,103 @@ impl PrismarineApp {
                 });
         }
     }
+
+    fn draw_launch_toast(&mut self, ctx: &egui::Context) {
+        let Some(toast) = self.launch_toast.clone() else {
+            return;
+        };
+        let lifetime = Duration::from_secs(6);
+        let elapsed = toast.shown_at.elapsed();
+        if elapsed > lifetime {
+            self.launch_toast = None;
+            return;
+        }
+
+        let t = (elapsed.as_secs_f32() / lifetime.as_secs_f32()).clamp(0.0, 1.0);
+        let ease_out_cubic = |x: f32| 1.0 - (1.0 - x).powi(3);
+        let ease_in_cubic = |x: f32| x.powi(3);
+        let lerp = |a: f32, b: f32, x: f32| a + (b - a) * x;
+
+        let in_end = 0.16;
+        let out_start = 0.82;
+        let base_x = -14.0;
+        let offset_x = if t < in_end {
+            let p = (t / in_end).clamp(0.0, 1.0);
+            lerp(34.0, base_x, ease_out_cubic(p))
+        } else if t > out_start {
+            let p = ((t - out_start) / (1.0 - out_start)).clamp(0.0, 1.0);
+            lerp(base_x, 34.0, ease_in_cubic(p))
+        } else {
+            base_x
+        };
+        let offset_y = 14.0;
+
+        let fill = egui::Color32::from_rgb(29, 31, 36);
+        let stroke = egui::Color32::from_rgb(84, 88, 97);
+        let title_color = if toast.is_error {
+            egui::Color32::from_rgb(232, 119, 119)
+        } else {
+            egui::Color32::from_rgb(235, 238, 245)
+        };
+        let subtitle_color = egui::Color32::from_rgb(178, 183, 194);
+
+        egui::Area::new("launch_toast_area".into())
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(offset_x, offset_y))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(fill)
+                    .stroke(egui::Stroke::new(1.0, stroke))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let icon_size = 36.0;
+                        if let Some(icon_path) = toast.icon_path.as_ref() {
+                            if let Some(tex) = self.ensure_icon_texture(ui.ctx(), icon_path) {
+                                ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                            } else if let Some(tex) =
+                                self.ensure_loader_icon_texture(ui.ctx(), &toast.loader)
+                            {
+                                ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                            } else {
+                                ui.add_space(icon_size);
+                            }
+                        } else if let Some(tex) =
+                            self.ensure_loader_icon_texture(ui.ctx(), &toast.loader)
+                        {
+                            ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
+                        } else {
+                            ui.add_space(icon_size);
+                        }
+                        ui.vertical(|ui| {
+                            let title_text = egui::RichText::new(toast.title.as_str())
+                                .size(22.0)
+                                .color(title_color);
+                            ui.label(title_text);
+                            ui.label(
+                                egui::RichText::new(toast.subtitle.as_str())
+                                    .size(15.0)
+                                    .color(subtitle_color)
+                                    .weak(),
+                            );
+                        });
+                    });
+                });
+            });
+    }
 }
 
 impl App for PrismarineApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         self.sync_process_states();
         self.poll_device_login_events();
+        self.poll_account_avatar_events();
         self.poll_download_search_events();
         self.poll_download_details_events();
         self.poll_download_queue_events();
         self.poll_launch_worker_events();
+        self.poll_import_worker_events();
         self.poll_create_versions();
         self.process_download_queue();
 
@@ -4226,6 +7916,8 @@ impl App for PrismarineApp {
                     || j.state == DownloadJobState::Downloading
             })
             || !self.launch_in_progress.is_empty()
+            || self.import_worker_rx.is_some()
+            || self.launch_toast.is_some()
             || self.create_versions_loading
         {
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -4323,20 +8015,58 @@ impl App for PrismarineApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.columns(2, |cols| {
-                cols[0].heading("Instances");
-                cols[0].separator();
-                self.draw_instance_list(&mut cols[0], ctx);
-
-                cols[1].heading("Instance Details");
-                cols[1].separator();
-                self.tab_selector(&mut cols[1]);
-                match self.active_tab {
-                    CenterTab::Overview => self.draw_overview_tab(&mut cols[1]),
-                    CenterTab::Mods => self.draw_mods_tab(&mut cols[1]),
-                    CenterTab::Logs => self.draw_logs_tab(&mut cols[1]),
-                    CenterTab::Settings => self.draw_settings_tab(&mut cols[1]),
-                }
+            let panel_height = ui.available_height();
+            let total_width = ui.available_width();
+            let left_width = (total_width * 0.34).clamp(260.0, 420.0);
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_width, panel_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.heading("Instances");
+                        ui.separator();
+                        let queue_height = if self.download_jobs.is_empty() {
+                            0.0
+                        } else {
+                            (panel_height * 0.28).clamp(130.0, 280.0)
+                        };
+                        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                            if queue_height > 0.0 {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(ui.available_width(), queue_height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        self.draw_download_queue(ui);
+                                    },
+                                );
+                                ui.separator();
+                            }
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), ui.available_height().max(120.0)),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    self.draw_instance_list(ui, ctx);
+                                },
+                            );
+                        });
+                    },
+                );
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), panel_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.heading("Instance Details");
+                        ui.separator();
+                        self.tab_selector(ui);
+                        match self.active_tab {
+                            CenterTab::Overview => self.draw_overview_tab(ui),
+                            CenterTab::Mods => self.draw_mods_tab(ui),
+                            CenterTab::Logs => self.draw_logs_tab(ui),
+                            CenterTab::Settings => self.draw_settings_tab(ui),
+                        }
+                    },
+                );
             });
         });
 
@@ -4361,11 +8091,22 @@ impl App for PrismarineApp {
                         ui.add(egui::ProgressBar::new(value).desired_width(220.0));
                         ui.monospace(format!("{}/{}", p.done, p.total));
                     }
+                } else if let Some(import) = &self.import_progress {
+                    ui.separator();
+                    let total = import.total.max(1) as f32;
+                    let value = (import.done as f32 / total).clamp(0.0, 1.0);
+                    ui.label(format!("Import {}:", import.stage));
+                    ui.add(egui::ProgressBar::new(value).desired_width(220.0));
+                    ui.monospace(format!("{}/{}", import.done, import.total));
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.monospace(format!("Version: {}", launcher_version_string()));
+                });
             });
         });
 
         self.draw_dialogs(ctx);
+        self.draw_launch_toast(ctx);
         self.persist();
     }
 }
@@ -4399,6 +8140,49 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit])
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn suitable_default_max_mem_mb() -> u32 {
+    let total_mb = {
+        #[cfg(target_os = "linux")]
+        {
+            let text = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+            text.lines()
+                .find_map(|line| {
+                    let trimmed = line.trim();
+                    if !trimmed.starts_with("MemTotal:") {
+                        return None;
+                    }
+                    let kb = trimmed
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|x| x.parse::<u64>().ok())?;
+                    Some((kb / 1024) as u32)
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0
+        }
+    };
+    if total_mb == 0 {
+        return 4096;
+    }
+    if (total_mb as f32) < (4096.0 * 1.5) {
+        ((total_mb as f32) / 1.5).round().max(512.0) as u32
+    } else {
+        4096
+    }
+}
+
+fn upsert_jvm_system_property(args: &mut Vec<String>, key: &str, value: &str) {
+    let prefix = format!("-D{key}=");
+    if let Some(pos) = args.iter().position(|x| x.starts_with(&prefix)) {
+        args[pos] = format!("{prefix}{value}");
+    } else {
+        args.push(format!("{prefix}{value}"));
     }
 }
 
@@ -4439,21 +8223,30 @@ fn java_supports_permgen(java_path: &str) -> bool {
     major <= 7
 }
 
+fn minecraft_head_icon_urls(name: &str) -> Vec<String> {
+    let encoded = percent_encode_query(name);
+    vec![
+        // NameMC first (can be blocked by Cloudflare in some regions/environments).
+        format!("https://namemc.com/avatar/{encoded}"),
+        // Fallbacks for stable launcher-side rendering.
+        format!("https://mc-heads.net/avatar/{encoded}/64"),
+        format!("https://minotar.net/helm/{encoded}/64.png"),
+    ]
+}
+
 fn minecraft_head_icon_url(name: &str) -> String {
-    format!(
-        "https://crafatar.com/avatars/{}?size=64&overlay=true",
-        percent_encode_query(name)
-    )
+    let encoded = percent_encode_query(name);
+    format!("https://mc-heads.net/avatar/{encoded}/64")
 }
 
 fn minecraft_body_icon_url(name: &str) -> String {
     format!(
-        "https://crafatar.com/renders/body/{}?overlay=true",
+        "https://minotar.net/body/{}/64.png",
         percent_encode_query(name)
     )
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct ImportSummary {
     game_version: String,
     loader: Option<CreateLoader>,
@@ -4484,16 +8277,25 @@ fn safe_zip_entry_target(base: &Path, entry_name: &str) -> Option<PathBuf> {
     Some(target)
 }
 
-fn extract_zip_file_to_dir(zip_path: &Path, destination: &Path) -> Result<(), String> {
+fn extract_zip_file_to_dir_with_progress<F>(
+    zip_path: &Path,
+    destination: &Path,
+    mut on_progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(usize, usize, String),
+{
     let file = fs::File::open(zip_path)
         .map_err(|e| format!("failed to open archive {}: {e}", zip_path.display()))?;
     let mut zip = ZipArchive::new(file)
         .map_err(|e| format!("failed to parse archive {}: {e}", zip_path.display()))?;
-    for i in 0..zip.len() {
+    let total = zip.len();
+    for i in 0..total {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| format!("failed to read archive entry #{i}: {e}"))?;
         let name = entry.name().to_string();
+        on_progress(i + 1, total, format!("Extracting {name}"));
         let Some(target) = safe_zip_entry_target(destination, &name) else {
             continue;
         };
@@ -4514,15 +8316,26 @@ fn extract_zip_file_to_dir(zip_path: &Path, destination: &Path) -> Result<(), St
     Ok(())
 }
 
-fn import_zip_archive(zip_path: &Path, instance_path: &Path) -> Result<ImportSummary, String> {
-    extract_zip_file_to_dir(zip_path, instance_path)?;
+fn import_zip_archive_with_progress<F>(
+    zip_path: &Path,
+    instance_path: &Path,
+    on_progress: F,
+) -> Result<ImportSummary, String>
+where
+    F: FnMut(usize, usize, String),
+{
+    extract_zip_file_to_dir_with_progress(zip_path, instance_path, on_progress)?;
     Ok(ImportSummary::default())
 }
 
-fn import_mrpack_archive(
+fn import_mrpack_archive_with_progress<F>(
     mrpack_path: &Path,
     instance_path: &Path,
-) -> Result<ImportSummary, String> {
+    mut on_progress: F,
+) -> Result<ImportSummary, String>
+where
+    F: FnMut(usize, usize, String),
+{
     let file = fs::File::open(mrpack_path)
         .map_err(|e| format!("failed to open mrpack {}: {e}", mrpack_path.display()))?;
     let mut zip = ZipArchive::new(file)
@@ -4530,11 +8343,13 @@ fn import_mrpack_archive(
 
     let mut summary = ImportSummary::default();
     let mut index_json_text = None::<String>;
-    for i in 0..zip.len() {
+    let total = zip.len();
+    for i in 0..total {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| format!("failed to read mrpack entry #{i}: {e}"))?;
         let name = entry.name().to_string();
+        on_progress(i + 1, total, format!("Extracting {name}"));
         if name == "modrinth.index.json" {
             let mut text = String::new();
             entry.read_to_string(&mut text).map_err(|e| {
@@ -4570,6 +8385,7 @@ fn import_mrpack_archive(
     }
 
     if let Some(text) = index_json_text {
+        on_progress(total.max(1), total.max(1), "Parsing modrinth.index.json".to_string());
         let mrpack_dir = instance_path.join("mrpack");
         fs::create_dir_all(&mrpack_dir)
             .map_err(|e| format!("failed to create mrpack dir {}: {e}", mrpack_dir.display()))?;
@@ -4616,17 +8432,256 @@ fn preferred_mods_dir(instance_path: &Path) -> PathBuf {
     fallback
 }
 
-fn resolve_mod_file_path(instance_path: &Path, mod_file_name: &str) -> Option<PathBuf> {
+fn all_existing_mod_dirs(instance_path: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
     for candidate in [
+        instance_path.join("minecraft/mods"),
+        instance_path.join(".minecraft/mods"),
+        instance_path.join("mods"),
+    ] {
+        if candidate.is_dir() && !dirs.iter().any(|x: &PathBuf| x == &candidate) {
+            dirs.push(candidate);
+        }
+    }
+    if dirs.is_empty() {
+        dirs.push(preferred_mods_dir(instance_path));
+    }
+    dirs
+}
+
+fn resolve_mod_file_path(instance_path: &Path, mod_file_name: &str) -> Option<PathBuf> {
+    [
         instance_path.join("minecraft/mods").join(mod_file_name),
         instance_path.join(".minecraft/mods").join(mod_file_name),
         instance_path.join("mods").join(mod_file_name),
-    ] {
-        if candidate.is_file() {
-            return Some(candidate);
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+fn read_zip_entry_text<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+    path: &str,
+) -> Option<String> {
+    let mut file = zip.by_name(path).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+fn read_manifest_implementation_version<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+) -> Option<String> {
+    let text = read_zip_entry_text(zip, "META-INF/MANIFEST.MF")?;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.to_ascii_lowercase().starts_with("implementation-version:") {
+            let value = trimmed
+                .split_once(':')
+                .map(|(_, v)| v.trim())
+                .unwrap_or_default();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
         }
     }
     None
+}
+
+fn parse_first_mods_toml_table(text: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let mut in_mods = false;
+    let mut mod_id: Option<String> = None;
+    let mut display_name: Option<String> = None;
+    let mut version: Option<String> = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("[[") && line.ends_with("]]") {
+            let section = line
+                .trim_start_matches("[[")
+                .trim_end_matches("]]")
+                .trim();
+            if section.eq_ignore_ascii_case("mods") {
+                if in_mods {
+                    break;
+                }
+                in_mods = true;
+                continue;
+            }
+            if in_mods {
+                break;
+            }
+            continue;
+        }
+        if !in_mods {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let mut value = v.trim();
+        if let Some((before, _)) = value.split_once('#') {
+            value = before.trim();
+        }
+        value = value.trim_matches('"').trim_matches('\'').trim();
+        if value.is_empty() {
+            continue;
+        }
+        match key {
+            "modId" => mod_id = Some(value.to_string()),
+            "displayName" => display_name = Some(value.to_string()),
+            "version" => version = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    (mod_id, display_name, version)
+}
+
+fn read_mods_toml_name_version<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+    path: &str,
+) -> Option<(String, String)> {
+    let text = read_zip_entry_text(zip, path)?;
+    let (mod_id, display_name, version) = parse_first_mods_toml_table(&text);
+    let name = display_name.or(mod_id)?;
+    let version = version.unwrap_or_default();
+    Some((name, version))
+}
+
+fn read_mcmod_info_name_version<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+) -> Option<(String, String)> {
+    let text = read_zip_entry_text(zip, "mcmod.info")?;
+    let json = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let obj = if let Some(arr) = json.as_array() {
+        arr.first()?.as_object()?.clone()
+    } else if let Some(root) = json.as_object() {
+        if let Some(arr) = root.get("modlist").and_then(|v| v.as_array()) {
+            arr.first()?.as_object()?.clone()
+        } else if let Some(arr) = root.get("modList").and_then(|v| v.as_array()) {
+            arr.first()?.as_object()?.clone()
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    let name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .or_else(|| obj.get("modid").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let version = obj
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((name, version))
+}
+
+fn read_quilt_mod_name_version<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+) -> Option<(String, String)> {
+    let text = read_zip_entry_text(zip, "quilt.mod.json")?;
+    let json = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let loader = json.get("quilt_loader")?;
+    let mod_id = loader.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let version = loader
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name = loader
+        .get("metadata")
+        .and_then(|m| m.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(mod_id)
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, version))
+}
+
+fn read_fabric_mod_name_version<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+) -> Option<(String, String)> {
+    let text = read_zip_entry_text(zip, "fabric.mod.json")?;
+    let json = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let mod_id = json.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let version = json
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(mod_id)
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, version))
+}
+
+fn read_forgeversion_properties_name_version<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+) -> Option<(String, String)> {
+    let text = read_zip_entry_text(zip, "forgeversion.properties")?;
+    let mut name = None::<String>;
+    let mut version = None::<String>;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        let value = v.trim();
+        if key.eq_ignore_ascii_case("name") {
+            name = Some(value.to_string());
+        } else if key.eq_ignore_ascii_case("version") || key.eq_ignore_ascii_case("revision") {
+            version = Some(value.to_string());
+        }
+    }
+    let name = name?;
+    Some((name, version.unwrap_or_default()))
+}
+
+fn read_litemod_name_version<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+) -> Option<(String, String)> {
+    let text = read_zip_entry_text(zip, "litemod.json")?;
+    let json = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let name = json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let version = json
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((name, version))
 }
 
 fn extract_modrinth_project_id_from_download_url(url: &str) -> Option<String> {
@@ -4653,6 +8708,31 @@ fn extract_version_from_mod_filename(file_name: &str) -> String {
         }
     }
     String::new()
+}
+
+fn compact_mod_version(version: &str) -> String {
+    let mut v = version.trim().to_string();
+    if v.is_empty() {
+        return v;
+    }
+    v = v.replace("fabric.rev.", "f.rev.");
+    v = v.replace("+build.", "+b.");
+    v = v.replace("+mc", "+");
+    v = v.replace("-release", "");
+    let limit = 20usize;
+    if v.chars().count() > limit {
+        let mut out = String::new();
+        for (i, ch) in v.chars().enumerate() {
+            if i >= limit - 1 {
+                break;
+            }
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    } else {
+        v
+    }
 }
 
 fn prettify_mod_name(file_name: &str) -> String {
@@ -4689,16 +8769,215 @@ fn preferred_resourcepacks_dir(instance_path: &Path) -> PathBuf {
     fallback
 }
 
+fn preferred_shaderpacks_dir(instance_path: &Path) -> PathBuf {
+    let candidates = [
+        instance_path.join("minecraft/shaderpacks"),
+        instance_path.join(".minecraft/shaderpacks"),
+        instance_path.join("shaderpacks"),
+    ];
+    for candidate in candidates {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    let fallback = instance_path.join("minecraft/shaderpacks");
+    let _ = fs::create_dir_all(&fallback);
+    fallback
+}
+
+fn preferred_worlds_dir(instance_path: &Path) -> PathBuf {
+    for candidate in [
+        instance_path.join("minecraft/saves"),
+        instance_path.join(".minecraft/saves"),
+        instance_path.join("saves"),
+    ] {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    let fallback = instance_path.join("minecraft/saves");
+    let _ = fs::create_dir_all(&fallback);
+    fallback
+}
+
+fn preferred_screenshots_dir(instance_path: &Path) -> PathBuf {
+    for candidate in [
+        instance_path.join("minecraft/screenshots"),
+        instance_path.join(".minecraft/screenshots"),
+        instance_path.join("screenshots"),
+    ] {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    let fallback = instance_path.join("minecraft/screenshots");
+    let _ = fs::create_dir_all(&fallback);
+    fallback
+}
+
 fn preferred_download_dir(instance_path: &Path, content_type: &DownloadContentType) -> PathBuf {
     match content_type {
         DownloadContentType::Mods => preferred_mods_dir(instance_path),
         DownloadContentType::ResourcePacks => preferred_resourcepacks_dir(instance_path),
+        DownloadContentType::ShaderPacks => preferred_shaderpacks_dir(instance_path),
+        DownloadContentType::Worlds => preferred_worlds_dir(instance_path),
+        DownloadContentType::Servers => instance_path.join("minecraft"),
+        DownloadContentType::Screenshots => preferred_screenshots_dir(instance_path),
     }
 }
 
 fn load_state() -> Option<PersistedState> {
     let text = fs::read_to_string(state_file_path()).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn load_instance_groups() -> Vec<InstanceGroupMeta> {
+    let path = groups_file_path();
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<InstanceGroupMeta>>(&text).unwrap_or_default()
+}
+
+fn save_instance_groups(groups: &[InstanceGroupMeta]) {
+    let path = groups_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(groups) {
+        let _ = fs::write(path, text);
+    }
+}
+
+fn save_instance_launch_overrides(
+    instance_path: &Path,
+    cfg: &PrismInstanceConfig,
+) -> std::io::Result<()> {
+    set_instance_cfg_value(
+        instance_path,
+        "OverrideJavaLocation",
+        Some(if cfg.override_java_location {
+            "true"
+        } else {
+            "false"
+        }),
+    )?;
+    set_instance_cfg_value(instance_path, "JavaPath", cfg.java_path.as_deref())?;
+    set_instance_cfg_value(
+        instance_path,
+        "OverrideJavaArgs",
+        Some(if cfg.override_java_args {
+            "true"
+        } else {
+            "false"
+        }),
+    )?;
+    set_instance_cfg_value(instance_path, "JvmArgs", cfg.java_args.as_deref())?;
+    set_instance_cfg_value(
+        instance_path,
+        "OverrideMemory",
+        Some(if cfg.override_memory { "true" } else { "false" }),
+    )?;
+    set_instance_cfg_value(
+        instance_path,
+        "MinMemAlloc",
+        cfg.min_mem_alloc.map(|x| x.to_string()).as_deref(),
+    )?;
+    set_instance_cfg_value(
+        instance_path,
+        "MaxMemAlloc",
+        cfg.max_mem_alloc.map(|x| x.to_string()).as_deref(),
+    )?;
+    set_instance_cfg_value(
+        instance_path,
+        "PermGen",
+        cfg.perm_gen.map(|x| x.to_string()).as_deref(),
+    )?;
+    set_instance_cfg_value(
+        instance_path,
+        "OverrideCommands",
+        Some(if cfg.override_commands { "true" } else { "false" }),
+    )?;
+    set_instance_cfg_value(
+        instance_path,
+        "PreLaunchCommand",
+        cfg.pre_launch_command.as_deref(),
+    )?;
+    set_instance_cfg_value(instance_path, "PostExitCommand", cfg.post_exit_command.as_deref())?;
+    set_instance_cfg_value(instance_path, "WrapperCommand", cfg.wrapper_command.as_deref())?;
+    Ok(())
+}
+
+fn set_instance_cfg_value(instance_path: &Path, key: &str, value: Option<&str>) -> std::io::Result<()> {
+    let cfg_path = instance_path.join("instance.cfg");
+    let existing = fs::read_to_string(&cfg_path).unwrap_or_else(|_| "# PrismarineLauncher instance\n".to_string());
+    let mut out = Vec::new();
+    let mut replaced = false;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if let Some((k, _)) = trimmed.split_once('=')
+            && k.trim().eq_ignore_ascii_case(key)
+        {
+            if let Some(v) = value {
+                out.push(format!("{key}={v}"));
+            }
+            replaced = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !replaced
+        && let Some(v) = value
+    {
+        out.push(format!("{key}={v}"));
+    }
+    let mut text = out.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    fs::write(cfg_path, text)
+}
+
+fn sanitize_key_fragment(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch.is_whitespace() {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "icon".to_string()
+    } else {
+        out
+    }
+}
+
+#[allow(dead_code)]
+fn copy_image_to_icon_store(data_root: &Path, source: &Path, base_name: &str) -> Option<String> {
+    let ext = source.extension().and_then(|x| x.to_str()).unwrap_or("png");
+    let key = format!("{}_{}", sanitize_key_fragment(base_name), chrono::Local::now().timestamp());
+    let icons_dir = data_root.join("icons");
+    let _ = fs::create_dir_all(&icons_dir);
+    let dest = icons_dir.join(format!("{key}.{ext}"));
+    fs::copy(source, dest).ok()?;
+    Some(key)
+}
+
+fn copy_image_to_group_store(data_root: &Path, source: &Path, group_name: &str) -> Option<String> {
+    let ext = source.extension().and_then(|x| x.to_str()).unwrap_or("png");
+    let file_name = format!(
+        "{}_{}.{}",
+        sanitize_key_fragment(group_name),
+        chrono::Local::now().timestamp(),
+        ext
+    );
+    let dir = data_root.join("group_icons");
+    let _ = fs::create_dir_all(&dir);
+    let dest = dir.join(file_name);
+    fs::copy(source, &dest).ok()?;
+    Some(dest.display().to_string())
 }
 
 fn shell_escape(input: &str) -> String {
@@ -4710,6 +8989,145 @@ fn shell_escape(input: &str) -> String {
     }
     let escaped = input.replace('\'', "'\"'\"'");
     format!("'{escaped}'")
+}
+
+fn decode_svg_rgba(bytes: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(bytes, &opt).ok()?;
+    let size = tree.size().to_int_size();
+    let width = size.width() as usize;
+    let height = size.height() as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width as u32, height as u32)?;
+    let mut pixmap_mut = pixmap.as_mut();
+    resvg::render(&tree, resvg::tiny_skia::Transform::default(), &mut pixmap_mut);
+    Some((pixmap.data().to_vec(), width, height))
+}
+
+fn extract_html_img_srcs(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    loop {
+        let Some(img_pos) = rest.find("<img") else {
+            break;
+        };
+        let after_img = &rest[img_pos..];
+        let Some(src_pos) = after_img.find("src=") else {
+            rest = &after_img[4..];
+            continue;
+        };
+        let after_src = &after_img[src_pos + 4..];
+        if let Some(stripped) = after_src.strip_prefix('"') {
+            if let Some(end) = stripped.find('"') {
+                let url = stripped[..end].trim();
+                if !url.is_empty() {
+                    out.push(url.to_string());
+                }
+                rest = &stripped[end + 1..];
+                continue;
+            }
+        } else if let Some(stripped) = after_src.strip_prefix('\'')
+            && let Some(end) = stripped.find('\'')
+        {
+            let url = stripped[..end].trim();
+            if !url.is_empty() {
+                out.push(url.to_string());
+            }
+            rest = &stripped[end + 1..];
+            continue;
+        }
+        rest = &after_src[1..];
+    }
+    out
+}
+
+fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let keep = max_chars - 1;
+    let mut out = String::with_capacity(max_chars);
+    for ch in text.chars().take(keep) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+fn html_line_has_center_image_hint(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("<center>")
+        || lower.contains("</center>")
+        || lower.contains("align=\"center\"")
+        || lower.contains("align='center'")
+}
+
+fn normalize_markdown_html_images(input: &str) -> String {
+    let mut out = String::new();
+    for line in input.lines() {
+        let trimmed = line.trim();
+        let image_urls = extract_html_img_srcs(trimmed);
+        if !image_urls.is_empty() {
+            let _centered = html_line_has_center_image_hint(trimmed);
+            for url in image_urls {
+                // Do not use markdown tables for centering: table borders create visual artifacts.
+                out.push_str(&format!("![]({url})\n\n"));
+            }
+            continue;
+        }
+        let cleaned = line
+            .replace("<center>", "")
+            .replace("</center>", "")
+            .replace("<p align=\"center\">", "")
+            .replace("<p align='center'>", "")
+            .replace("</p>", "");
+        out.push_str(&cleaned);
+        out.push('\n');
+    }
+    out
+}
+
+fn json_text_compact(value: &serde_json::Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    if let Some(obj) = value.as_object() {
+        if let Some(text) = obj.get("text") {
+            let t = json_text_compact(text);
+            if !t.trim().is_empty() {
+                return t;
+            }
+        }
+        if let Some(extra) = obj.get("extra")
+            && let Some(arr) = extra.as_array()
+        {
+            let merged = arr
+                .iter()
+                .map(json_text_compact)
+                .collect::<Vec<_>>()
+                .join("");
+            if !merged.trim().is_empty() {
+                return merged;
+            }
+        }
+    }
+    if let Some(arr) = value.as_array() {
+        return arr
+            .iter()
+            .map(json_text_compact)
+            .collect::<Vec<_>>()
+            .join("");
+    }
+    String::new()
 }
 
 fn remove_arg_pair(args: &mut Vec<String>, key: &str) {
@@ -4753,8 +9171,24 @@ fn pseudo_uuid_from_name(name: &str) -> String {
         (a >> 16) as u16,
         a as u16,
         (b >> 48) as u16,
-        (b & 0x0000_FFFF_FFFF_FFFF) as u64
+        b & 0x0000_FFFF_FFFF_FFFF
     )
+}
+
+fn normalize_minecraft_uuid(raw: &str) -> String {
+    let compact: String = raw.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if compact.len() == 32 {
+        format!(
+            "{}-{}-{}-{}-{}",
+            &compact[0..8],
+            &compact[8..12],
+            &compact[12..16],
+            &compact[16..20],
+            &compact[20..32]
+        )
+    } else {
+        raw.to_string()
+    }
 }
 
 fn load_accounts() -> Vec<Account> {
