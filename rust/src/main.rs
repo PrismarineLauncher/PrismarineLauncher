@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 7;
+const LAUNCHER_VERSION_BUILD: u32 = 8;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -5841,7 +5841,7 @@ impl PrismarineApp {
         });
         egui::SidePanel::left("content_categories_left")
             .resizable(false)
-            .exact_width(170.0)
+            .exact_width(122.0)
             .show_inside(ui, |ui| {
                 let items: &[(DownloadContentType, &str, &str)] = &[
                     (
@@ -5878,11 +5878,11 @@ impl PrismarineApp {
                 for (idx, (kind, title, icon_url)) in items.iter().enumerate() {
                     let selected = self.download_content_type == *kind;
                     let mut clicked = false;
-                    ui.horizontal(|ui| {
+                    ui.vertical_centered(|ui| {
                         if let Some(tex) = self.ensure_icon_texture_from_source(ui.ctx(), icon_url) {
                             if ui
                                 .add(
-                                    egui::Button::image((tex.id(), egui::vec2(22.0, 22.0)))
+                                    egui::Button::image((tex.id(), egui::vec2(34.0, 34.0)))
                                         .selected(selected),
                                 )
                                 .clicked()
@@ -5890,10 +5890,11 @@ impl PrismarineApp {
                                 clicked = true;
                             }
                         }
+                        let label = truncate_with_ellipsis(title, 15);
                         if ui
                             .add_sized(
-                                [ui.available_width(), 24.0],
-                                egui::Button::new(egui::RichText::new(*title).size(16.0))
+                                [104.0, 18.0],
+                                egui::Button::new(egui::RichText::new(label).size(12.5))
                                     .selected(selected)
                                     .frame(false),
                             )
