@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 8;
+const LAUNCHER_VERSION_BUILD: u32 = 9;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -5878,7 +5878,9 @@ impl PrismarineApp {
                 for (idx, (kind, title, icon_url)) in items.iter().enumerate() {
                     let selected = self.download_content_type == *kind;
                     let mut clicked = false;
-                    ui.vertical_centered(|ui| {
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.vertical_centered(|ui| {
                         if let Some(tex) = self.ensure_icon_texture_from_source(ui.ctx(), icon_url) {
                             if ui
                                 .add(
@@ -5902,6 +5904,7 @@ impl PrismarineApp {
                         {
                             clicked = true;
                         }
+                        });
                     });
                     if clicked {
                         self.download_content_type = kind.clone();
@@ -5925,7 +5928,18 @@ impl PrismarineApp {
                         }
                     }
                     if idx + 1 < items.len() {
-                        ui.separator();
+                        let (sep_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 2.0),
+                            egui::Sense::hover(),
+                        );
+                        let y = sep_rect.center().y;
+                        ui.painter().line_segment(
+                            [egui::pos2(sep_rect.left(), y), egui::pos2(sep_rect.right(), y)],
+                            egui::Stroke::new(
+                                1.0,
+                                ui.visuals().widgets.noninteractive.bg_stroke.color,
+                            ),
+                        );
                     }
                 }
             });
@@ -7727,11 +7741,14 @@ impl PrismarineApp {
                                     }
                                 }
                                 _ => {
-                                    cols[1].heading("Custom Icons");
-                                    cols[1].separator();
-                                    if cols[1].button("Import Custom Icon...").clicked() {
-                                        import_custom = true;
-                                    }
+                            cols[1].heading("Custom Icons");
+                            cols[1].separator();
+                            if cols[1]
+                                .add_sized([170.0, 24.0], egui::Button::new("Import Custom Icon..."))
+                                .clicked()
+                            {
+                                import_custom = true;
+                            }
                                     cols[1].separator();
                                     if custom_icons.is_empty() {
                                         cols[1].label("No custom icons in icon store");
@@ -7808,20 +7825,32 @@ impl PrismarineApp {
 
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button("Add Icon").clicked() {
+                            if ui
+                                .add_sized([88.0, 24.0], egui::Button::new("Add Icon"))
+                                .clicked()
+                            {
                                 import_custom = true;
                             }
-                            if ui.button("Remove Icon").clicked() {
+                            if ui
+                                .add_sized([102.0, 24.0], egui::Button::new("Remove Icon"))
+                                .clicked()
+                            {
                                 remove_selected_custom = true;
                             }
-                            if ui.button("Open Folder").clicked() {
+                            if ui
+                                .add_sized([102.0, 24.0], egui::Button::new("Open Folder"))
+                                .clicked()
+                            {
                                 open_icons_folder = true;
                             }
                             ui.separator();
-                            if ui.button("OK").clicked() {
+                            if ui.add_sized([52.0, 24.0], egui::Button::new("OK")).clicked() {
                                 apply_selection = true;
                             }
-                            if ui.button("Cancel").clicked() {
+                            if ui
+                                .add_sized([70.0, 24.0], egui::Button::new("Cancel"))
+                                .clicked()
+                            {
                                 self.show_set_icon_dialog = false;
                             }
                         });
@@ -8284,7 +8313,7 @@ impl PrismarineApp {
 
                         cols[1].heading("Account Management");
                         cols[1].separator();
-                        let action_btn_w = 210.0;
+                        let action_btn_w = 170.0;
                         if cols[1]
                             .add_sized(
                                 [action_btn_w, 26.0],
@@ -8383,13 +8412,22 @@ impl PrismarineApp {
                     });
                     ui.separator();
                     ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
+                        if ui
+                            .add_sized([52.0, 24.0], egui::Button::new("OK"))
+                            .clicked()
+                        {
                             self.show_manage_accounts_dialog = false;
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui
+                            .add_sized([70.0, 24.0], egui::Button::new("Cancel"))
+                            .clicked()
+                        {
                             self.show_manage_accounts_dialog = false;
                         }
-                        if ui.button("Help").clicked() {
+                        if ui
+                            .add_sized([56.0, 24.0], egui::Button::new("Help"))
+                            .clicked()
+                        {
                             self.status =
                                 "Account management: select an account and an action on the right."
                                     .to_string();
