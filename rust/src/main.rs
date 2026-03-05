@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 12;
+const LAUNCHER_VERSION_BUILD: u32 = 13;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -609,6 +609,10 @@ struct PrismarineApp {
     processes: HashMap<String, Child>,
     show_add_account_dialog: bool,
     show_manage_accounts_dialog: bool,
+    show_java_picker_dialog: bool,
+    java_picker_candidates: Vec<(String, String)>,
+    java_picker_selected: Option<usize>,
+    java_picker_instance_path: Option<String>,
     manage_account_selected: Option<usize>,
     new_account_name: String,
     new_account_token: String,
@@ -767,6 +771,10 @@ impl Default for PrismarineApp {
             processes: HashMap::new(),
             show_add_account_dialog: false,
             show_manage_accounts_dialog: false,
+            show_java_picker_dialog: false,
+            java_picker_candidates: Vec::new(),
+            java_picker_selected: None,
+            java_picker_instance_path: None,
             manage_account_selected: None,
             new_account_name: String::new(),
             new_account_token: String::new(),
@@ -2921,24 +2929,76 @@ impl PrismarineApp {
             "Java not found automatically. Use 'Browse' to select java binary.".to_string();
     }
 
-    fn do_browse_java(&mut self) {
-        let mut dialog = rfd::FileDialog::new().set_title("Select Java executable");
-        if let Ok(home) = std::env::var("HOME") {
-            dialog = dialog.set_directory(home);
+    fn rebuild_java_picker_candidates(&mut self) {
+        let mut out = Vec::<(String, String)>::new();
+        let mut seen = HashSet::<String>::new();
+        for candidate in Self::discover_java_candidates() {
+            if !candidate.exists() {
+                continue;
+            }
+            let key = candidate.display().to_string();
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if let Some(version) = Self::probe_java_runtime(&candidate) {
+                out.push((key, version));
+            }
         }
-        let Some(path) = dialog.pick_file() else {
-            return;
+        out.sort_by(|a, b| {
+            let av = a.1.to_ascii_lowercase();
+            let bv = b.1.to_ascii_lowercase();
+            av.cmp(&bv)
+                .then_with(|| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()))
+        });
+        self.java_picker_candidates = out;
+        self.java_picker_selected = if self.java_picker_candidates.is_empty() {
+            None
+        } else {
+            Some(0)
         };
-        let version = Self::probe_java_runtime(&path);
-        self.global_settings.java_path = path.display().to_string();
-        save_global_settings(&self.global_settings);
-        self.status = match version {
-            Some(v) => format!("Java selected: {v}"),
-            None => format!(
-                "Selected path saved, but runtime check failed: {}",
-                self.global_settings.java_path
-            ),
-        };
+    }
+
+    fn open_java_picker_global(&mut self) {
+        self.rebuild_java_picker_candidates();
+        self.java_picker_instance_path = None;
+        self.show_java_picker_dialog = true;
+    }
+
+    fn open_java_picker_instance(&mut self, instance_path: &Path) {
+        self.rebuild_java_picker_candidates();
+        self.java_picker_instance_path = Some(instance_path.display().to_string());
+        self.show_java_picker_dialog = true;
+    }
+
+    fn apply_java_picker_selection(&mut self, java_path: String) {
+        if let Some(instance_path) = self.java_picker_instance_path.clone() {
+            let path = PathBuf::from(&instance_path);
+            let mut cfg = load_prism_instance_config(&path).unwrap_or_default();
+            cfg.override_java_location = true;
+            cfg.java_path = Some(java_path);
+            match save_instance_launch_overrides(&path, &cfg) {
+                Ok(_) => {
+                    let instance_name = self
+                        .instances
+                        .iter()
+                        .find(|x| x.path == instance_path)
+                        .map(|x| x.name.clone())
+                        .unwrap_or_else(|| "instance".to_string());
+                    self.status = format!("Java set for {instance_name}");
+                }
+                Err(err) => {
+                    self.status = format!("Failed to save instance Java path: {err}");
+                }
+            }
+        } else {
+            self.global_settings.java_path = java_path.clone();
+            save_global_settings(&self.global_settings);
+            self.status = format!("Global Java set: {java_path}");
+        }
+    }
+
+    fn do_browse_java(&mut self) {
+        self.open_java_picker_global();
     }
 
     fn do_check_java_settings(&mut self) {
@@ -7435,15 +7495,7 @@ impl PrismarineApp {
                                 }
                             }
                             if ui.button("Browse").clicked() {
-                                let mut dialog =
-                                    rfd::FileDialog::new().set_title("Select Java executable");
-                                if let Ok(home) = std::env::var("HOME") {
-                                    dialog = dialog.set_directory(home);
-                                }
-                                if let Some(path) = dialog.pick_file() {
-                                    cfg.java_path = Some(path.display().to_string());
-                                    changed = true;
-                                }
+                                self.open_java_picker_instance(&instance_path);
                             }
                         });
                     }
@@ -8018,6 +8070,92 @@ impl PrismarineApp {
                     }
                 }
             }
+        }
+
+        if self.show_java_picker_dialog {
+            egui::Window::new("Select Java Runtime")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(780.0)
+                .default_height(460.0)
+                .show(ctx, |ui| {
+                    let scope_label = if let Some(instance_path) = &self.java_picker_instance_path {
+                        let name = self
+                            .instances
+                            .iter()
+                            .find(|x| &x.path == instance_path)
+                            .map(|x| x.name.clone())
+                            .unwrap_or_else(|| "instance".to_string());
+                        format!("Target: {name}")
+                    } else {
+                        "Target: Global launcher settings".to_string()
+                    };
+                    ui.label(scope_label);
+                    ui.separator();
+                    ui.label("Auto-detected Java versions:");
+                    ui.separator();
+
+                    egui::ScrollArea::vertical()
+                        .id_salt("java_picker_detected_scroll")
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            if self.java_picker_candidates.is_empty() {
+                                ui.label("No Java runtimes detected automatically.");
+                            } else {
+                                for (idx, (path, version)) in
+                                    self.java_picker_candidates.iter().enumerate()
+                                {
+                                    let selected = self.java_picker_selected == Some(idx);
+                                    let title = format!("{version}\n{path}");
+                                    if ui.selectable_label(selected, title).clicked() {
+                                        self.java_picker_selected = Some(idx);
+                                    }
+                                }
+                            }
+                        });
+
+                    ui.separator();
+                    let mut apply_selected = false;
+                    let mut pick_custom = false;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                self.java_picker_selected.is_some(),
+                                egui::Button::new("Use Selected"),
+                            )
+                            .clicked()
+                        {
+                            apply_selected = true;
+                        }
+                        if ui.button("Select custom...").clicked() {
+                            pick_custom = true;
+                        }
+                        if ui.button("Refresh list").clicked() {
+                            self.rebuild_java_picker_candidates();
+                        }
+                        ui.separator();
+                        if ui.button("Cancel").clicked() {
+                            self.show_java_picker_dialog = false;
+                        }
+                    });
+                    if apply_selected
+                        && let Some(sel) = self.java_picker_selected
+                        && let Some((path, _)) = self.java_picker_candidates.get(sel).cloned()
+                    {
+                        self.apply_java_picker_selection(path);
+                        self.show_java_picker_dialog = false;
+                    }
+                    if pick_custom {
+                        let mut dialog = rfd::FileDialog::new().set_title("Select Java executable");
+                        if let Ok(home) = std::env::var("HOME") {
+                            dialog = dialog.set_directory(home);
+                        }
+                        if let Some(path) = dialog.pick_file() {
+                            self.apply_java_picker_selection(path.display().to_string());
+                            self.show_java_picker_dialog = false;
+                        }
+                    }
+                });
         }
 
         if self.show_create_dialog {
