@@ -1,4 +1,5 @@
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -7,6 +8,7 @@ use std::ffi::{CStr, c_char};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use tar::Archive;
 use std::thread;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
@@ -384,11 +386,109 @@ pub fn list_logs(instance_path: &Path) -> std::io::Result<Vec<LogSummary>> {
 }
 
 pub fn read_log_preview(path: &Path, max_chars: usize) -> std::io::Result<String> {
-    let text = fs::read_to_string(path)?;
-    if text.chars().count() <= max_chars {
-        return Ok(text);
+    let name = path
+        .file_name()
+        .and_then(|x| x.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        return read_tar_gz_log_preview(path, max_chars);
     }
-    Ok(text.chars().take(max_chars).collect())
+    if name.ends_with(".gz") {
+        return read_gzip_log_preview(path, max_chars);
+    }
+    let text = fs::read_to_string(path)?;
+    Ok(limit_preview_chars(&text, max_chars))
+}
+
+fn limit_preview_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars).collect();
+    out.push_str("\n...[truncated]");
+    out
+}
+
+fn read_gzip_log_preview(path: &Path, max_chars: usize) -> std::io::Result<String> {
+    let file = fs::File::open(path)?;
+    let mut decoder = GzDecoder::new(file);
+    let mut bytes = Vec::new();
+    decoder.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    Ok(limit_preview_chars(&text, max_chars))
+}
+
+fn read_tar_gz_log_preview(path: &Path, max_chars: usize) -> std::io::Result<String> {
+    let file = fs::File::open(path)?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    let mut out = String::new();
+    let mut found_any = false;
+    let mut reached_limit = false;
+
+    let entries = archive.entries()?;
+    for entry_result in entries {
+        let mut entry = match entry_result {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let entry_path = entry
+            .path()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let lower = entry_path.to_ascii_lowercase();
+        if !(lower.ends_with(".log")
+            || lower.ends_with(".txt")
+            || lower.ends_with(".out")
+            || lower.ends_with(".log.gz"))
+        {
+            continue;
+        }
+
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        let body = if lower.ends_with(".gz") {
+            let mut gz = GzDecoder::new(bytes.as_slice());
+            let mut unzipped = Vec::new();
+            if gz.read_to_end(&mut unzipped).is_ok() {
+                String::from_utf8_lossy(&unzipped).to_string()
+            } else {
+                String::from_utf8_lossy(&bytes).to_string()
+            }
+        } else {
+            String::from_utf8_lossy(&bytes).to_string()
+        };
+
+        found_any = true;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("--- {} ---\n", entry_path));
+        out.push_str(&body);
+        out.push('\n');
+
+        if out.chars().count() >= max_chars {
+            reached_limit = true;
+            break;
+        }
+    }
+
+    if !found_any {
+        return Ok("No log files found inside archive".to_string());
+    }
+
+    if reached_limit {
+        Ok(limit_preview_chars(&out, max_chars))
+    } else {
+        Ok(out)
+    }
 }
 
 pub fn load_prism_instance_config(instance_path: &Path) -> std::io::Result<PrismInstanceConfig> {

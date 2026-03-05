@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 26;
+const LAUNCHER_VERSION_BUILD: u32 = 27;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -7457,7 +7457,21 @@ impl PrismarineApp {
                     if self.log_preview.is_empty() {
                         ui.label("No log selected");
                     } else {
-                        ui.monospace(&self.log_preview);
+                        for line in self.log_preview.lines() {
+                            if line.is_empty() {
+                                ui.monospace(" ");
+                                continue;
+                            }
+                            let style = classify_log_line_style(line, ui.visuals());
+                            let mut text = egui::RichText::new(line)
+                                .monospace()
+                                .size(14.0)
+                                .color(style.0);
+                            if style.1 {
+                                text = text.strong();
+                            }
+                            ui.label(text);
+                        }
                     }
                 });
         });
@@ -10310,6 +10324,30 @@ fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     }
     out.push('…');
     out
+}
+
+fn classify_log_line_style(line: &str, visuals: &egui::Visuals) -> (egui::Color32, bool) {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains(" exception")
+        || lower.contains("fatal")
+        || lower.contains("error")
+        || line.starts_with("Caused by:")
+    {
+        return (egui::Color32::from_rgb(232, 102, 102), true);
+    }
+    if lower.contains(" warn") || lower.contains("[warn]") || lower.contains("warning") {
+        return (egui::Color32::from_rgb(230, 190, 80), false);
+    }
+    if lower.contains(" info") || lower.contains("[info]") || lower.contains("starting ") {
+        return (egui::Color32::from_rgb(134, 186, 255), false);
+    }
+    if lower.contains("debug") || lower.contains("trace") {
+        return (egui::Color32::from_rgb(135, 147, 168), false);
+    }
+    if line.starts_with('\t') || line.trim_start().starts_with("at ") {
+        return (egui::Color32::from_rgb(176, 124, 216), false);
+    }
+    (visuals.text_color(), false)
 }
 
 fn html_line_has_center_image_hint(line: &str) -> bool {
