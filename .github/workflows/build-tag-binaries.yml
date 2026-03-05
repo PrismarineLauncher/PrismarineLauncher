@@ -137,6 +137,7 @@ jobs:
           fi
 
       - name: Publish binaries to binaries branch
+        id: publish_bin_branch
         shell: bash
         run: |
           set -euo pipefail
@@ -157,9 +158,28 @@ jobs:
           git add "dist/${TAG}"
           if git diff --cached --quiet; then
             echo "No binaries changes to commit"
+            BIN_SHA="$(git rev-parse HEAD)"
           else
             git commit -m "Add binaries for ${TAG}"
             git push origin binaries
+            BIN_SHA="$(git rev-parse HEAD)"
+          fi
+          echo "bin_sha=${BIN_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Create/push binaries tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
+          BIN_SHA="${{ steps.publish_bin_branch.outputs.bin_sha }}"
+          BIN_TAG="${TAG}-binaries"
+          git checkout develop >/dev/null 2>&1 || git checkout "${GITHUB_REF_NAME}" >/dev/null 2>&1 || true
+          git fetch --tags origin
+          if git rev-parse -q --verify "refs/tags/${BIN_TAG}" >/dev/null; then
+            echo "Binaries tag ${BIN_TAG} already exists, skip create"
+          else
+            git tag -a "${BIN_TAG}" "${BIN_SHA}" -m "PrismarineLauncher binaries for ${TAG}"
+            git push origin "${BIN_TAG}"
           fi
 
       - name: Summary
@@ -168,4 +188,5 @@ jobs:
           TAG="${{ needs.resolve-tag.outputs.tag }}"
           echo "Tag: ${TAG}" >> "$GITHUB_STEP_SUMMARY"
           echo "Binaries branch path: dist/${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Binaries tag: ${TAG}-binaries" >> "$GITHUB_STEP_SUMMARY"
           echo "GitHub Release is not created by this workflow." >> "$GITHUB_STEP_SUMMARY"
