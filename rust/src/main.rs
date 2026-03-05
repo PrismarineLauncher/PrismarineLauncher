@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 27;
+const LAUNCHER_VERSION_BUILD: u32 = 28;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -7437,9 +7437,24 @@ impl PrismarineApp {
                 .id_salt("logs_files_scroll")
                 .show(&mut cols[0], |ui| {
                     let mut clicked_index = None;
-                    for (idx, (name, _)) in self.logs_cache.iter().enumerate() {
+                    for idx in 0..self.logs_cache.len() {
+                        let name = self.logs_cache[idx].0.clone();
                         let selected = self.selected_log == Some(idx);
-                        if ui.selectable_label(selected, name).clicked() {
+                        let (icon_url, display_name) = log_icon_and_name(&name);
+                        let mut row_clicked = false;
+                        ui.horizontal(|ui| {
+                            if let Some(tex) =
+                                self.ensure_icon_texture_from_source(ui.ctx(), icon_url)
+                            {
+                                ui.image((tex.id(), egui::vec2(18.0, 18.0)));
+                            } else {
+                                ui.add_space(18.0);
+                            }
+                            if ui.selectable_label(selected, display_name).clicked() {
+                                row_clicked = true;
+                            }
+                        });
+                        if row_clicked {
                             clicked_index = Some(idx);
                         }
                     }
@@ -10348,6 +10363,21 @@ fn classify_log_line_style(line: &str, visuals: &egui::Visuals) -> (egui::Color3
         return (egui::Color32::from_rgb(176, 124, 216), false);
     }
     (visuals.text_color(), false)
+}
+
+fn log_icon_and_name(file_name: &str) -> (&'static str, &str) {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        (
+            "https://minecraft.wiki/images/Written_Book_JE2_BE2.gif?c6510?download",
+            file_name,
+        )
+    } else {
+        (
+            "https://minecraft.wiki/images/Book_and_Quill_JE2_BE2.png?2128f?download",
+            file_name,
+        )
+    }
 }
 
 fn html_line_has_center_image_hint(line: &str) -> bool {
