@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 5;
+const LAUNCHER_VERSION_BUILD: u32 = 6;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
