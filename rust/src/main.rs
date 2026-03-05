@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 4;
+const LAUNCHER_VERSION_BUILD: u32 = 5;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -384,6 +384,17 @@ enum DeviceLoginEvent {
 enum AccountAvatarEvent {
     Ready { key: String },
     Error { key: String },
+}
+
+#[derive(Clone, Debug)]
+enum ScreenshotThumbEvent {
+    Ready {
+        source_path: String,
+        thumb_path: String,
+    },
+    Error {
+        source_path: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -609,6 +620,10 @@ struct PrismarineApp {
     account_avatar_tx: Sender<AccountAvatarEvent>,
     account_avatar_rx: Receiver<AccountAvatarEvent>,
     account_avatar_pending: HashSet<String>,
+    screenshot_thumb_tx: Sender<ScreenshotThumbEvent>,
+    screenshot_thumb_rx: Receiver<ScreenshotThumbEvent>,
+    screenshot_thumb_pending: HashSet<String>,
+    screenshot_thumb_cache: HashMap<String, String>,
     show_download_panel: bool,
     content_list_ratio: f32,
     download_provider: DownloadProvider,
@@ -699,6 +714,7 @@ impl Default for PrismarineApp {
         let (download_queue_tx, download_queue_rx) = mpsc::channel::<DownloadQueueEvent>();
         let (launch_worker_tx, launch_worker_rx) = mpsc::channel::<LaunchWorkerEvent>();
         let (account_avatar_tx, account_avatar_rx) = mpsc::channel::<AccountAvatarEvent>();
+        let (screenshot_thumb_tx, screenshot_thumb_rx) = mpsc::channel::<ScreenshotThumbEvent>();
         let current_version = launcher_version_string();
         let previous_version = persisted.last_seen_launcher_version.trim().to_string();
         let show_version_update_dialog =
@@ -762,6 +778,10 @@ impl Default for PrismarineApp {
             account_avatar_tx,
             account_avatar_rx,
             account_avatar_pending: HashSet::new(),
+            screenshot_thumb_tx,
+            screenshot_thumb_rx,
+            screenshot_thumb_pending: HashSet::new(),
+            screenshot_thumb_cache: HashMap::new(),
             show_download_panel: false,
             content_list_ratio: 0.58,
             download_provider: DownloadProvider::Modrinth,
@@ -1701,6 +1721,99 @@ impl PrismarineApp {
                 }
                 AccountAvatarEvent::Error { key } => {
                     self.account_avatar_pending.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn screenshot_thumb_cache_path(&self, source_path: &str) -> PathBuf {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        source_path.hash(&mut h);
+        self.data_root
+            .join("cache")
+            .join("screenshot_thumbs")
+            .join(format!("{:016x}.png", h.finish()))
+    }
+
+    fn ensure_screenshot_thumbnail_texture(
+        &mut self,
+        ctx: &egui::Context,
+        source_path: &str,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(cached_path) = self.screenshot_thumb_cache.get(source_path).cloned()
+            && Path::new(&cached_path).is_file()
+        {
+            return self.ensure_icon_texture(ctx, &cached_path);
+        }
+        let thumb_path = self.screenshot_thumb_cache_path(source_path);
+        if thumb_path.is_file() {
+            let thumb_s = thumb_path.display().to_string();
+            self.screenshot_thumb_cache
+                .insert(source_path.to_string(), thumb_s.clone());
+            return self.ensure_icon_texture(ctx, &thumb_s);
+        }
+        if self.screenshot_thumb_pending.contains(source_path) {
+            return None;
+        }
+        self.screenshot_thumb_pending
+            .insert(source_path.to_string());
+        let tx = self.screenshot_thumb_tx.clone();
+        let source = source_path.to_string();
+        std::thread::spawn(move || {
+            let source_pb = PathBuf::from(&source);
+            let thumb_pb = local_data_root()
+                .join("cache")
+                .join("screenshot_thumbs")
+                .join({
+                    let mut hh = std::collections::hash_map::DefaultHasher::new();
+                    source.hash(&mut hh);
+                    format!("{:016x}.png", hh.finish())
+                });
+            let _ = fs::create_dir_all(
+                thumb_pb
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| local_data_root().join("cache").join("screenshot_thumbs")),
+            );
+            let ok = (|| -> Option<()> {
+                let bytes = fs::read(&source_pb).ok()?;
+                let image = image::load_from_memory(&bytes).ok()?;
+                let thumb = image.thumbnail(320, 180).to_rgba8();
+                image::DynamicImage::ImageRgba8(thumb)
+                    .save_with_format(&thumb_pb, image::ImageFormat::Png)
+                    .ok()?;
+                Some(())
+            })()
+            .is_some();
+            let _ = if ok {
+                tx.send(ScreenshotThumbEvent::Ready {
+                    source_path: source.clone(),
+                    thumb_path: thumb_pb.display().to_string(),
+                })
+            } else {
+                tx.send(ScreenshotThumbEvent::Error {
+                    source_path: source,
+                })
+            };
+        });
+        None
+    }
+
+    fn poll_screenshot_thumbnail_events(&mut self) {
+        loop {
+            let Ok(event) = self.screenshot_thumb_rx.try_recv() else {
+                break;
+            };
+            match event {
+                ScreenshotThumbEvent::Ready {
+                    source_path,
+                    thumb_path,
+                } => {
+                    self.screenshot_thumb_pending.remove(&source_path);
+                    self.screenshot_thumb_cache.insert(source_path, thumb_path);
+                }
+                ScreenshotThumbEvent::Error { source_path } => {
+                    self.screenshot_thumb_pending.remove(&source_path);
                 }
             }
         }
@@ -6065,11 +6178,16 @@ impl PrismarineApp {
                 ui.label(msg);
             } else {
                 if self.download_content_type == DownloadContentType::Screenshots {
-                    let tile_w = 180.0;
-                    let thumb_w = 150.0;
-                    let thumb_h = 84.0;
-                    let total_w = ui.available_width().max(tile_w);
-                    let cols = ((total_w / tile_w).floor() as usize).max(1);
+                    let min_tile_w = 190.0;
+                    let tile_gap = 14.0;
+                    let total_w = ui.available_width().max(min_tile_w);
+                    let cols =
+                        (((total_w + tile_gap) / (min_tile_w + tile_gap)).floor() as usize).max(1);
+                    let tile_w = ((total_w - tile_gap * (cols.saturating_sub(1)) as f32)
+                        / cols as f32)
+                        .max(min_tile_w);
+                    let thumb_w = (tile_w - 10.0).clamp(160.0, 320.0);
+                    let thumb_h = (thumb_w * 9.0 / 16.0).round();
                     let mut scroll =
                         egui::ScrollArea::vertical().id_salt("screenshots_grid_scroll");
                     if self.show_download_panel {
@@ -6088,44 +6206,70 @@ impl PrismarineApp {
                                     {
                                         label = stem.to_string();
                                     }
-                                    ui.vertical(|ui| {
-                                        let mut image_resp = ui.allocate_response(
-                                            egui::vec2(thumb_w, thumb_h),
-                                            egui::Sense::click(),
-                                        );
-                                        if let Some(icon_path) = &item.icon_path
-                                            && let Some(tex) = self.ensure_icon_texture_from_source(
-                                                ui.ctx(),
-                                                icon_path,
-                                            )
-                                        {
-                                            image_resp = ui.add(
-                                                egui::Image::new((
-                                                    tex.id(),
-                                                    egui::vec2(thumb_w, thumb_h),
-                                                ))
-                                                .sense(egui::Sense::click()),
-                                            );
-                                        }
-                                        if image_resp.double_clicked() {
-                                            self.copy_image_file_to_clipboard(&file_path);
-                                        }
-                                        image_resp.context_menu(|ui| {
-                                            if ui.button("Copy screenshot").clicked() {
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(tile_w, thumb_h + 32.0),
+                                        egui::Layout::top_down(egui::Align::LEFT),
+                                        |ui| {
+                                            let image_resp =
+                                                if let Some(icon_path) = &item.icon_path {
+                                                    if let Some(tex) = self
+                                                        .ensure_screenshot_thumbnail_texture(
+                                                            ui.ctx(),
+                                                            icon_path,
+                                                        )
+                                                    {
+                                                        ui.add(
+                                                            egui::Image::new((
+                                                                tex.id(),
+                                                                egui::vec2(thumb_w, thumb_h),
+                                                            ))
+                                                            .sense(egui::Sense::click()),
+                                                        )
+                                                    } else {
+                                                        let resp = ui.allocate_response(
+                                                            egui::vec2(thumb_w, thumb_h),
+                                                            egui::Sense::click(),
+                                                        );
+                                                        ui.painter().text(
+                                                            resp.rect.center(),
+                                                            egui::Align2::CENTER_CENTER,
+                                                            "Loading...",
+                                                            egui::FontId::proportional(12.0),
+                                                            ui.visuals().weak_text_color(),
+                                                        );
+                                                        resp
+                                                    }
+                                                } else {
+                                                    ui.allocate_response(
+                                                        egui::vec2(thumb_w, thumb_h),
+                                                        egui::Sense::click(),
+                                                    )
+                                                };
+                                            if image_resp.double_clicked() {
                                                 self.copy_image_file_to_clipboard(&file_path);
-                                                ui.close();
                                             }
-                                            if ui.button("Delete content").clicked() {
-                                                pending_delete = Some(file_path.clone());
-                                                ui.close();
-                                            }
-                                        });
-                                        ui.label(
-                                            egui::RichText::new(label)
-                                                .size(13.0)
-                                                .color(ui.visuals().text_color()),
-                                        );
-                                    });
+                                            image_resp.context_menu(|ui| {
+                                                if ui.button("Copy screenshot").clicked() {
+                                                    self.copy_image_file_to_clipboard(&file_path);
+                                                    ui.close();
+                                                }
+                                                if ui.button("Delete content").clicked() {
+                                                    pending_delete = Some(file_path.clone());
+                                                    ui.close();
+                                                }
+                                            });
+                                            ui.add_sized(
+                                                [thumb_w, 18.0],
+                                                egui::Label::new(
+                                                    egui::RichText::new(truncate_with_ellipsis(
+                                                        &label, 28,
+                                                    ))
+                                                    .size(14.0)
+                                                    .color(ui.visuals().text_color()),
+                                                ),
+                                            );
+                                        },
+                                    );
                                     if idx % cols == cols - 1 {
                                         ui.end_row();
                                     }
@@ -8455,6 +8599,7 @@ impl App for PrismarineApp {
         self.sync_process_states();
         self.poll_device_login_events();
         self.poll_account_avatar_events();
+        self.poll_screenshot_thumbnail_events();
         self.poll_download_search_events();
         self.poll_download_details_events();
         self.poll_download_queue_events();
@@ -8488,6 +8633,7 @@ impl App for PrismarineApp {
             || self.import_worker_rx.is_some()
             || self.launch_toast.is_some()
             || self.create_versions_loading
+            || !self.screenshot_thumb_pending.is_empty()
         {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
