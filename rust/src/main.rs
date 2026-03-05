@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 15;
+const LAUNCHER_VERSION_BUILD: u32 = 16;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -6517,26 +6517,28 @@ impl PrismarineApp {
                                     let name_resp = ui
                                         .allocate_ui_with_layout(
                                             egui::vec2(col_name, row_height + 8.0),
-                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            egui::Layout::top_down(egui::Align::Center),
                                             |ui| {
-                                                if let Some(tex) = self
-                                                    .ensure_content_icon_with_fallback(
-                                                        ui.ctx(),
-                                                        DownloadContentType::Servers,
-                                                        icon_path.as_deref(),
-                                                    )
-                                                {
-                                                    ui.image((
-                                                        tex.id(),
-                                                        egui::vec2(icon_size, icon_size),
-                                                    ));
-                                                } else {
-                                                    ui.add_space(icon_size);
-                                                }
-                                                ui.label(
-                                                    egui::RichText::new(display_name.as_str())
-                                                        .size(table_font_size),
-                                                );
+                                                ui.horizontal_centered(|ui| {
+                                                    if let Some(tex) = self
+                                                        .ensure_content_icon_with_fallback(
+                                                            ui.ctx(),
+                                                            DownloadContentType::Servers,
+                                                            icon_path.as_deref(),
+                                                        )
+                                                    {
+                                                        ui.image((
+                                                            tex.id(),
+                                                            egui::vec2(icon_size, icon_size),
+                                                        ));
+                                                    } else {
+                                                        ui.add_space(icon_size);
+                                                    }
+                                                    ui.label(
+                                                        egui::RichText::new(display_name.as_str())
+                                                            .size(table_font_size),
+                                                    );
+                                                });
                                             },
                                         )
                                         .response;
