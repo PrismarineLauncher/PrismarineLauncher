@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 2;
+const LAUNCHER_VERSION_BUILD: u32 = 3;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -7374,23 +7374,44 @@ impl PrismarineApp {
 
                         ui.columns(2, |cols| {
                             cols[0].set_min_width(210.0);
-                            cols[0].selectable_value(
-                                &mut self.set_icon_dialog_section,
-                                0,
-                                "Built-in Icons",
-                            );
+                            let built_selected = self.set_icon_dialog_section == 0;
+                            if cols[0]
+                                .add_sized(
+                                    [188.0, 28.0],
+                                    egui::Button::new("Built-in Icons")
+                                        .selected(built_selected)
+                                        .frame(false),
+                                )
+                                .clicked()
+                            {
+                                self.set_icon_dialog_section = 0;
+                            }
                             cols[0].separator();
-                            cols[0].selectable_value(
-                                &mut self.set_icon_dialog_section,
-                                1,
-                                "Icons From Other Instances",
-                            );
+                            let other_selected = self.set_icon_dialog_section == 1;
+                            if cols[0]
+                                .add_sized(
+                                    [188.0, 28.0],
+                                    egui::Button::new("Icons From Other Instances")
+                                        .selected(other_selected)
+                                        .frame(false),
+                                )
+                                .clicked()
+                            {
+                                self.set_icon_dialog_section = 1;
+                            }
                             cols[0].separator();
-                            cols[0].selectable_value(
-                                &mut self.set_icon_dialog_section,
-                                2,
-                                "Custom Icons",
-                            );
+                            let custom_selected = self.set_icon_dialog_section == 2;
+                            if cols[0]
+                                .add_sized(
+                                    [188.0, 28.0],
+                                    egui::Button::new("Custom Icons")
+                                        .selected(custom_selected)
+                                        .frame(false),
+                                )
+                                .clicked()
+                            {
+                                self.set_icon_dialog_section = 2;
+                            }
 
                             match self.set_icon_dialog_section {
                                 0 => {
@@ -7561,10 +7582,15 @@ impl PrismarineApp {
                                                                             icon_path.clone();
                                                                     }
                                                                 }
-                                                                ui.add_sized(
+                                                                let short_name =
+                                                                    truncate_with_ellipsis(name, 16);
+                                                                let name_resp = ui.add_sized(
                                                                     [96.0, 32.0],
-                                                                    egui::Label::new(name).wrap(),
+                                                                    egui::Label::new(short_name),
                                                                 );
+                                                                if name_resp.hovered() {
+                                                                    name_resp.on_hover_text(name);
+                                                                }
                                                             });
                                                             drawn += 1;
                                                             if drawn.is_multiple_of(columns) {
@@ -7633,10 +7659,15 @@ impl PrismarineApp {
                                                                             name.clone();
                                                                     }
                                                                 }
-                                                                ui.add_sized(
+                                                                let short_name =
+                                                                    truncate_with_ellipsis(&name, 16);
+                                                                let name_resp = ui.add_sized(
                                                                     [96.0, 32.0],
-                                                                    egui::Label::new(&name).wrap(),
+                                                                    egui::Label::new(short_name),
                                                                 );
+                                                                if name_resp.hovered() {
+                                                                    name_resp.on_hover_text(name.clone());
+                                                                }
                                                             });
                                                             drawn += 1;
                                                             if drawn.is_multiple_of(columns) {
