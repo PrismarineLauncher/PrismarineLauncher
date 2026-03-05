@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 6;
+const LAUNCHER_VERSION_BUILD: u32 = 7;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -7519,41 +7519,21 @@ impl PrismarineApp {
                         ui.columns(2, |cols| {
                             cols[0].set_min_width(210.0);
                             let built_selected = self.set_icon_dialog_section == 0;
-                            if cols[0]
-                                .add_sized(
-                                    [188.0, 28.0],
-                                    egui::Button::new("Built-in Icons")
-                                        .selected(built_selected)
-                                        .frame(false),
-                                )
-                                .clicked()
-                            {
+                            let built_resp = cols[0].selectable_label(built_selected, "Built-in Icons");
+                            if built_resp.clicked() {
                                 self.set_icon_dialog_section = 0;
                             }
                             cols[0].separator();
                             let other_selected = self.set_icon_dialog_section == 1;
-                            if cols[0]
-                                .add_sized(
-                                    [188.0, 28.0],
-                                    egui::Button::new("Icons From Other Instances")
-                                        .selected(other_selected)
-                                        .frame(false),
-                                )
-                                .clicked()
-                            {
+                            let other_resp =
+                                cols[0].selectable_label(other_selected, "Icons From Other Instances");
+                            if other_resp.clicked() {
                                 self.set_icon_dialog_section = 1;
                             }
                             cols[0].separator();
                             let custom_selected = self.set_icon_dialog_section == 2;
-                            if cols[0]
-                                .add_sized(
-                                    [188.0, 28.0],
-                                    egui::Button::new("Custom Icons")
-                                        .selected(custom_selected)
-                                        .frame(false),
-                                )
-                                .clicked()
-                            {
+                            let custom_resp = cols[0].selectable_label(custom_selected, "Custom Icons");
+                            if custom_resp.clicked() {
                                 self.set_icon_dialog_section = 2;
                             }
 
