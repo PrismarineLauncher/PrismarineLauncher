@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 28;
+const LAUNCHER_VERSION_BUILD: u32 = 29;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -7466,26 +7466,38 @@ impl PrismarineApp {
 
             cols[1].label("Preview");
             cols[1].separator();
-            egui::ScrollArea::vertical()
+            egui::ScrollArea::both()
                 .id_salt("logs_preview_scroll")
                 .show(&mut cols[1], |ui| {
                     if self.log_preview.is_empty() {
                         ui.label("No log selected");
                     } else {
-                        for line in self.log_preview.lines() {
-                            if line.is_empty() {
-                                ui.monospace(" ");
-                                continue;
-                            }
-                            let style = classify_log_line_style(line, ui.visuals());
-                            let mut text = egui::RichText::new(line)
-                                .monospace()
-                                .size(14.0)
-                                .color(style.0);
-                            if style.1 {
-                                text = text.strong();
-                            }
-                            ui.label(text);
+                        for (idx, raw_line) in self.log_preview.lines().enumerate() {
+                            let line = sanitize_log_line(raw_line);
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    [44.0, 0.0],
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("{:>4}", idx + 1))
+                                            .monospace()
+                                            .size(13.0)
+                                            .color(egui::Color32::from_rgb(115, 121, 133)),
+                                    ),
+                                );
+                                if line.is_empty() {
+                                    ui.monospace(" ");
+                                } else {
+                                    let style = classify_log_line_style(&line, ui.visuals());
+                                    let mut text = egui::RichText::new(line.as_str())
+                                        .monospace()
+                                        .size(14.0)
+                                        .color(style.0);
+                                    if style.1 {
+                                        text = text.strong();
+                                    }
+                                    ui.label(text);
+                                }
+                            });
                         }
                     }
                 });
@@ -10363,6 +10375,27 @@ fn classify_log_line_style(line: &str, visuals: &egui::Visuals) -> (egui::Color3
         return (egui::Color32::from_rgb(176, 124, 216), false);
     }
     (visuals.text_color(), false)
+}
+
+fn sanitize_log_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if matches!(chars.peek(), Some('[')) {
+                let _ = chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out.replace('\t', "    ")
 }
 
 fn log_icon_and_name(file_name: &str) -> (&'static str, &str) {
