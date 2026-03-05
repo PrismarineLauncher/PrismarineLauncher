@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 3;
+const LAUNCHER_VERSION_BUILD: u32 = 4;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -8159,7 +8159,14 @@ impl PrismarineApp {
 
                         cols[1].heading("Account Management");
                         cols[1].separator();
-                        if cols[1].button("Login via Microsoft").clicked() {
+                        let action_btn_w = 210.0;
+                        if cols[1]
+                            .add_sized(
+                                [action_btn_w, 26.0],
+                                egui::Button::new("Login via Microsoft"),
+                            )
+                            .clicked()
+                        {
                             self.show_add_account_dialog = true;
                             self.do_start_device_code_login();
                         }
@@ -8167,7 +8174,10 @@ impl PrismarineApp {
                             ui.label("Add offline:");
                             ui.text_edit_singleline(&mut self.new_offline_account_name);
                         });
-                        if cols[1].button("Add offline").clicked() {
+                        if cols[1]
+                            .add_sized([action_btn_w, 26.0], egui::Button::new("Add offline"))
+                            .clicked()
+                        {
                             self.add_offline_account();
                         }
                         cols[1].separator();
@@ -8176,41 +8186,71 @@ impl PrismarineApp {
                             .map(|i| i < self.accounts.len())
                             .unwrap_or(false);
                         if cols[1]
-                            .add_enabled(selected_ok, egui::Button::new("Refresh"))
+                            .add_enabled_ui(selected_ok, |ui| {
+                                ui.add_sized([action_btn_w, 26.0], egui::Button::new("Refresh"))
+                            })
+                            .inner
                             .clicked()
                         {
                             self.refresh_selected_account();
                         }
                         if cols[1]
-                            .add_enabled(selected_ok, egui::Button::new("Delete"))
+                            .add_enabled_ui(selected_ok, |ui| {
+                                ui.add_sized([action_btn_w, 26.0], egui::Button::new("Delete"))
+                            })
+                            .inner
                             .clicked()
                         {
                             self.delete_selected_account();
                         }
                         if cols[1]
-                            .add_enabled(selected_ok, egui::Button::new("Set as default"))
+                            .add_enabled_ui(selected_ok, |ui| {
+                                ui.add_sized(
+                                    [action_btn_w, 26.0],
+                                    egui::Button::new("Set as default"),
+                                )
+                            })
+                            .inner
                             .clicked()
                             && let Some(idx) = self.manage_account_selected
                         {
                             self.set_active_account(idx);
                         }
-                        if cols[1].button("Do not use by default").clicked() {
+                        if cols[1]
+                            .add_sized(
+                                [action_btn_w, 26.0],
+                                egui::Button::new("Do not use by default"),
+                            )
+                            .clicked()
+                        {
                             self.clear_active_account();
                         }
                         if cols[1]
-                            .add_enabled(selected_ok, egui::Button::new("Move up"))
+                            .add_enabled_ui(selected_ok, |ui| {
+                                ui.add_sized([action_btn_w, 26.0], egui::Button::new("Move up"))
+                            })
+                            .inner
                             .clicked()
                         {
                             self.move_selected_account(-1);
                         }
                         if cols[1]
-                            .add_enabled(selected_ok, egui::Button::new("Move down"))
+                            .add_enabled_ui(selected_ok, |ui| {
+                                ui.add_sized([action_btn_w, 26.0], egui::Button::new("Move down"))
+                            })
+                            .inner
                             .clicked()
                         {
                             self.move_selected_account(1);
                         }
                         if cols[1]
-                            .add_enabled(selected_ok, egui::Button::new("Skin management"))
+                            .add_enabled_ui(selected_ok, |ui| {
+                                ui.add_sized(
+                                    [action_btn_w, 26.0],
+                                    egui::Button::new("Skin management"),
+                                )
+                            })
+                            .inner
                             .clicked()
                         {
                             self.status = "Skin management is not implemented yet".to_string();
