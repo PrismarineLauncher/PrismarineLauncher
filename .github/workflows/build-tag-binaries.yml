@@ -1,0 +1,171 @@
+name: Build Rust Binaries + Tag (No Release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name (optional, default: v<rust/Cargo.toml version>)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-tag:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag from input/Cargo.toml
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(grep -m1 '^version = "' rust/Cargo.toml | sed -E 's/^version = "([^"]+)".*$/\1/')"
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="v${VERSION}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+          echo "Resolved tag: $TAG"
+
+  build:
+    name: Build (${{ matrix.os_name }})
+    needs: resolve-tag
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_name: linux
+            bin_name: prismarine_launcher
+            archive_ext: tar.gz
+          - runner: macos-latest
+            os_name: macos
+            bin_name: prismarine_launcher
+            archive_ext: tar.gz
+          - runner: windows-latest
+            os_name: windows
+            bin_name: prismarine_launcher.exe
+            archive_ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd rust
+          cargo build --release
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
+          PKG_DIR="pkg"
+          mkdir -p "$PKG_DIR"
+          FILE="prismarine_launcher-${TAG}-${{ matrix.os_name }}.${{ matrix.archive_ext }}"
+          tar -czf "${PKG_DIR}/${FILE}" -C rust/target/release "${{ matrix.bin_name }}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Tag = "${{ needs.resolve-tag.outputs.tag }}"
+          $PkgDir = "pkg"
+          New-Item -ItemType Directory -Force -Path $PkgDir | Out-Null
+          $File = "prismarine_launcher-$Tag-${{ matrix.os_name }}.${{ matrix.archive_ext }}"
+          Compress-Archive -Path "rust/target/release/${{ matrix.bin_name }}" -DestinationPath "$PkgDir/$File" -Force
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.os_name }}
+          path: pkg/*
+          if-no-files-found: error
+
+  publish-tag-and-binaries:
+    name: Publish tag and binaries branch
+    needs: [resolve-tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+          merge-multiple: true
+
+      - name: Create/push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags origin
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists, skip create"
+          else
+            git tag -a "${TAG}" -m "PrismarineLauncher ${TAG}"
+            git push origin "${TAG}"
+          fi
+
+      - name: Publish binaries to binaries branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --heads origin binaries | grep -q "refs/heads/binaries"; then
+            git fetch origin binaries
+            git checkout -B binaries origin/binaries
+          else
+            git checkout --orphan binaries
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p "dist/${TAG}"
+          cp -f downloaded/* "dist/${TAG}/"
+          git add "dist/${TAG}"
+          if git diff --cached --quiet; then
+            echo "No binaries changes to commit"
+          else
+            git commit -m "Add binaries for ${TAG}"
+            git push origin binaries
+          fi
+
+      - name: Summary
+        shell: bash
+        run: |
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
+          echo "Tag: ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Binaries branch path: dist/${TAG}" >> "$GITHUB_STEP_SUMMARY"
+          echo "GitHub Release is not created by this workflow." >> "$GITHUB_STEP_SUMMARY"

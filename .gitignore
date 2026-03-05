@@ -2,3 +2,6 @@
 !/.gitignore
 !/rust/
 !/rust/**
+!/.github/
+!/.github/workflows/
+!/.github/workflows/build-tag-binaries.yml
