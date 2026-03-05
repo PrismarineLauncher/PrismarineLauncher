@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 10;
+const LAUNCHER_VERSION_BUILD: u32 = 11;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -3232,33 +3232,59 @@ impl PrismarineApp {
                 }
             }
         }
+        if let Some(path) = read_mcmod_info_logo_path(&mut zip) {
+            icon_candidates.push(path);
+        }
 
         if icon_candidates.is_empty() {
             for fallback in ["icon.png", "assets/icon.png", "logo.png"] {
-                if zip.by_name(fallback).is_ok() {
+                if resolve_zip_entry_name(&mut zip, fallback).is_some() {
                     icon_candidates.push(fallback.to_string());
                     break;
+                }
+            }
+            if icon_candidates.is_empty() {
+                for i in 0..zip.len() {
+                    let Ok(entry) = zip.by_index(i) else {
+                        continue;
+                    };
+                    let entry_name = entry.name().to_string();
+                    let lower = entry_name.to_ascii_lowercase();
+                    if !(lower.ends_with(".png")
+                        || lower.ends_with(".jpg")
+                        || lower.ends_with(".jpeg")
+                        || lower.ends_with(".webp")
+                        || lower.ends_with(".gif"))
+                    {
+                        continue;
+                    }
+                    if lower.contains("icon") || lower.contains("logo") {
+                        icon_candidates.push(entry_name);
+                        if icon_candidates.len() >= 4 {
+                            break;
+                        }
+                    }
                 }
             }
         }
 
         for icon_path in icon_candidates {
-            let mut entry = match zip.by_name(&icon_path) {
-                Ok(e) => e,
-                Err(_) => continue,
+            let (resolved_icon_path, bytes) = match read_zip_entry_bytes_fuzzy(&mut zip, &icon_path)
+            {
+                Some(v) => v,
+                None => continue,
             };
-            let mut bytes = Vec::new();
-            if entry.read_to_end(&mut bytes).is_err() || bytes.is_empty() {
+            if image::load_from_memory(&bytes).is_err() {
                 continue;
             }
-            let ext = Path::new(&icon_path)
+            let ext = Path::new(&resolved_icon_path)
                 .extension()
                 .and_then(|x| x.to_str())
                 .filter(|x| !x.trim().is_empty())
                 .unwrap_or("png");
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             mod_file.display().to_string().hash(&mut hasher);
-            icon_path.hash(&mut hasher);
+            resolved_icon_path.hash(&mut hasher);
             if let Ok(meta) = fs::metadata(mod_file)
                 && let Ok(modified) = meta.modified()
                 && let Ok(delta) = modified.duration_since(std::time::UNIX_EPOCH)
@@ -3346,7 +3372,17 @@ impl PrismarineApp {
             .and_then(|x| x.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if ext != "zip" && ext != "jar" {
+        let archive_ext = if ext == "disabled" {
+            content_file
+                .file_stem()
+                .and_then(|x| Path::new(x).extension())
+                .and_then(|x| x.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        } else {
+            ext.clone()
+        };
+        if archive_ext != "zip" && archive_ext != "jar" {
             return None;
         }
         let file = fs::File::open(content_file).ok()?;
@@ -3355,6 +3391,14 @@ impl PrismarineApp {
             "pack.png".to_string(),
             "icon.png".to_string(),
             "preview.png".to_string(),
+            "pack.jpg".to_string(),
+            "pack.jpeg".to_string(),
+            "pack.webp".to_string(),
+            "shaders/icon.png".to_string(),
+            "shaders/pack.png".to_string(),
+            "shaders/preview.png".to_string(),
+            "shaderpacks/icon.png".to_string(),
+            "shaderpacks/pack.png".to_string(),
         ];
         if let Ok(mut mcmeta) = zip.by_name("pack.mcmeta") {
             let mut text = String::new();
@@ -3369,17 +3413,17 @@ impl PrismarineApp {
             }
         }
         for icon_path in icon_candidates {
-            let mut entry = match zip.by_name(&icon_path) {
-                Ok(e) => e,
-                Err(_) => continue,
+            let (resolved_icon_path, bytes) = match read_zip_entry_bytes_fuzzy(&mut zip, &icon_path)
+            {
+                Some(v) => v,
+                None => continue,
             };
-            let mut bytes = Vec::new();
-            if entry.read_to_end(&mut bytes).is_err() || bytes.is_empty() {
+            if image::load_from_memory(&bytes).is_err() {
                 continue;
             }
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             content_file.display().to_string().hash(&mut hasher);
-            icon_path.hash(&mut hasher);
+            resolved_icon_path.hash(&mut hasher);
             if let Ok(meta) = fs::metadata(content_file)
                 && let Ok(modified) = meta.modified()
                 && let Ok(delta) = modified.duration_since(std::time::UNIX_EPOCH)
@@ -3409,7 +3453,17 @@ impl PrismarineApp {
             .and_then(|x| x.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if ext != "zip" && ext != "jar" {
+        let archive_ext = if ext == "disabled" {
+            content_file
+                .file_stem()
+                .and_then(|x| Path::new(x).extension())
+                .and_then(|x| x.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        } else {
+            ext
+        };
+        if archive_ext != "zip" && archive_ext != "jar" {
             return None;
         }
         let file = fs::File::open(content_file).ok()?;
@@ -9150,6 +9204,51 @@ fn read_zip_entry_text<R: Read + std::io::Seek>(
     Some(text)
 }
 
+fn normalize_zip_entry_path(path: &str) -> String {
+    path.trim()
+        .trim_start_matches('/')
+        .replace('\\', "/")
+        .to_ascii_lowercase()
+}
+
+fn resolve_zip_entry_name<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+    wanted: &str,
+) -> Option<String> {
+    let wanted_norm = normalize_zip_entry_path(wanted);
+    if wanted_norm.is_empty() {
+        return None;
+    }
+    if zip.by_name(&wanted_norm).is_ok() {
+        return Some(wanted_norm);
+    }
+    for i in 0..zip.len() {
+        let Ok(entry) = zip.by_index(i) else {
+            continue;
+        };
+        let entry_name = entry.name().to_string();
+        let entry_norm = normalize_zip_entry_path(&entry_name);
+        if entry_norm == wanted_norm || entry_norm.ends_with(&format!("/{}", wanted_norm)) {
+            return Some(entry_name);
+        }
+    }
+    None
+}
+
+fn read_zip_entry_bytes_fuzzy<R: Read + std::io::Seek>(
+    zip: &mut ZipArchive<R>,
+    wanted: &str,
+) -> Option<(String, Vec<u8>)> {
+    let resolved = resolve_zip_entry_name(zip, wanted)?;
+    let mut file = zip.by_name(&resolved).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some((resolved, bytes))
+}
+
 fn read_manifest_implementation_version<R: Read + std::io::Seek>(
     zip: &mut ZipArchive<R>,
 ) -> Option<String> {
@@ -9267,6 +9366,34 @@ fn read_mcmod_info_name_version<R: Read + std::io::Seek>(
         .unwrap_or("")
         .to_string();
     Some((name, version))
+}
+
+fn read_mcmod_info_logo_path<R: Read + std::io::Seek>(zip: &mut ZipArchive<R>) -> Option<String> {
+    let text = read_zip_entry_text(zip, "mcmod.info")?;
+    let json = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let obj = if let Some(arr) = json.as_array() {
+        arr.first()?.as_object()?.clone()
+    } else if let Some(root) = json.as_object() {
+        if let Some(arr) = root.get("modlist").and_then(|v| v.as_array()) {
+            arr.first()?.as_object()?.clone()
+        } else if let Some(arr) = root.get("modList").and_then(|v| v.as_array()) {
+            arr.first()?.as_object()?.clone()
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    let path = obj
+        .get("logoFile")
+        .and_then(|v| v.as_str())
+        .or_else(|| obj.get("logo").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 fn read_quilt_mod_name_version<R: Read + std::io::Seek>(
