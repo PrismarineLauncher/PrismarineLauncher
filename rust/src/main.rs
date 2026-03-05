@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 25;
+const LAUNCHER_VERSION_BUILD: u32 = 26;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -6323,7 +6323,7 @@ impl PrismarineApp {
                 }
             });
         ui.horizontal(|ui| {
-            ui.heading(category_title);
+            ui.label(egui::RichText::new(category_title).size(32.0).strong());
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new(format!("Total: {current_total}"))
