@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 21;
+const LAUNCHER_VERSION_BUILD: u32 = 22;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -1955,7 +1955,16 @@ impl PrismarineApp {
                 ServerPingEvent::Error { key } => {
                     self.server_ping_pending.remove(&key);
                     self.server_ping_cache
-                        .insert(key, ("offline".to_string(), None, Instant::now()));
+                        .insert(key.clone(), ("offline".to_string(), None, Instant::now()));
+                    for entry in &mut self.servers_cache {
+                        let cache_key = Self::server_ping_key(
+                            Path::new(&entry.file_path),
+                            entry.version.as_str(),
+                        );
+                        if cache_key == key {
+                            entry.updated_at = "offline".to_string();
+                        }
+                    }
                 }
             }
         }
@@ -6652,32 +6661,27 @@ impl PrismarineApp {
                     });
                 } else if self.download_content_type == DownloadContentType::Servers {
                     let table_font_size = 17.0;
-                    let row_height = ui.text_style_height(&egui::TextStyle::Body).max(40.0);
-                    let icon_size = 44.0;
-                    let total_width = ui.available_width().max(620.0);
-                    let col_image = 72.0;
-                    let col_name = (total_width * 0.42).max(260.0);
-                    let col_addr = (total_width * 0.38).max(230.0);
-                    let col_online = (total_width - col_image - col_name - col_addr).max(90.0);
+                    let row_height = ui.text_style_height(&egui::TextStyle::Body).max(52.0);
+                    let icon_size = 40.0;
+                    let total_width = ui.available_width().max(420.0);
+                    let spacing = ui.spacing().item_spacing.x;
+                    let col_server = (total_width * 0.43).max(170.0);
+                    let col_addr = (total_width * 0.35).max(140.0);
+                    let col_online =
+                        (total_width - col_server - col_addr - 2.0 * spacing).max(88.0);
                     let mut scroll = egui::ScrollArea::vertical().id_salt("servers_table_scroll");
                     if self.show_download_panel {
                         scroll = scroll.max_height(top_panel_max_height);
                     }
                     scroll.show(ui, |ui| {
                         egui::Grid::new("servers_table_grid")
-                            .num_columns(4)
+                            .num_columns(3)
                             .striped(true)
                             .show(ui, |ui| {
                                 ui.add_sized(
-                                    [col_image, 0.0],
+                                    [col_server, 0.0],
                                     egui::Label::new(
-                                        egui::RichText::new("Image").size(table_font_size),
-                                    ),
-                                );
-                                ui.add_sized(
-                                    [col_name, 0.0],
-                                    egui::Label::new(
-                                        egui::RichText::new("Name").size(table_font_size),
+                                        egui::RichText::new("Server").size(table_font_size),
                                     ),
                                 );
                                 ui.add_sized(
@@ -6698,37 +6702,43 @@ impl PrismarineApp {
                                     let file_path = item.file_path.clone();
                                     let display_name = item.display_name.clone();
                                     let addr = item.version.clone();
-                                    let online = item.updated_at.clone();
+                                    let online = if item.updated_at.trim().is_empty() {
+                                        "...".to_string()
+                                    } else {
+                                        item.updated_at.clone()
+                                    };
                                     let icon_path = item.icon_path.clone();
 
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(col_image, row_height + 6.0),
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            if let Some(tex) = self
-                                                .ensure_content_icon_with_fallback(
-                                                    ui.ctx(),
-                                                    DownloadContentType::Servers,
-                                                    icon_path.as_deref(),
-                                                )
-                                            {
-                                                ui.image((
-                                                    tex.id(),
-                                                    egui::vec2(icon_size, icon_size),
-                                                ));
-                                            } else {
-                                                ui.add_space(icon_size);
-                                            }
-                                        },
-                                    );
-                                    let name_resp = ui.add_sized(
-                                        [col_name, row_height + 6.0],
-                                        egui::Label::new(
-                                            egui::RichText::new(display_name.as_str())
-                                                .size(table_font_size),
+                                    let name_resp = ui
+                                        .allocate_ui_with_layout(
+                                            egui::vec2(col_server, row_height + 8.0),
+                                            egui::Layout::top_down(egui::Align::Center),
+                                            |ui| {
+                                                if let Some(tex) = self
+                                                    .ensure_content_icon_with_fallback(
+                                                        ui.ctx(),
+                                                        DownloadContentType::Servers,
+                                                        icon_path.as_deref(),
+                                                    )
+                                                {
+                                                    ui.image((
+                                                        tex.id(),
+                                                        egui::vec2(icon_size, icon_size),
+                                                    ));
+                                                } else {
+                                                    ui.add_space(icon_size);
+                                                }
+                                                ui.add_sized(
+                                                    [col_server - 8.0, 18.0],
+                                                    egui::Label::new(
+                                                        egui::RichText::new(display_name.as_str())
+                                                            .size(table_font_size),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
                                         )
-                                        .truncate(),
-                                    );
+                                        .response;
                                     name_resp.context_menu(|ui| {
                                         if ui.button("Delete content").clicked() {
                                             pending_delete = Some(file_path.clone());
