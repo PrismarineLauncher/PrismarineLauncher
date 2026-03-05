@@ -369,7 +369,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 18;
+const LAUNCHER_VERSION_BUILD: u32 = 19;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -561,6 +561,19 @@ enum DownloadQueueEvent {
     },
 }
 
+#[derive(Clone, Debug)]
+enum ServerPingEvent {
+    Ready {
+        key: String,
+        address: String,
+        online_text: String,
+        icon_url: Option<String>,
+    },
+    Error {
+        key: String,
+    },
+}
+
 struct PrismarineApp {
     instances: Vec<Instance>,
     groups: Vec<InstanceGroupMeta>,
@@ -681,6 +694,10 @@ struct PrismarineApp {
     last_stopped_instance_path: Option<String>,
     launch_toast: Option<LaunchToast>,
     running_process_pids: HashMap<String, u32>,
+    server_ping_tx: Sender<ServerPingEvent>,
+    server_ping_rx: Receiver<ServerPingEvent>,
+    server_ping_pending: HashSet<String>,
+    server_ping_cache: HashMap<String, (String, Option<String>, Instant)>,
     show_version_update_dialog: bool,
     previous_launcher_version: Option<String>,
     last_seen_launcher_version: String,
@@ -719,6 +736,7 @@ impl Default for PrismarineApp {
         let (launch_worker_tx, launch_worker_rx) = mpsc::channel::<LaunchWorkerEvent>();
         let (account_avatar_tx, account_avatar_rx) = mpsc::channel::<AccountAvatarEvent>();
         let (screenshot_thumb_tx, screenshot_thumb_rx) = mpsc::channel::<ScreenshotThumbEvent>();
+        let (server_ping_tx, server_ping_rx) = mpsc::channel::<ServerPingEvent>();
         let current_version = launcher_version_string();
         let previous_version = persisted.last_seen_launcher_version.trim().to_string();
         let show_version_update_dialog =
@@ -843,6 +861,10 @@ impl Default for PrismarineApp {
             last_stopped_instance_path: None,
             launch_toast: None,
             running_process_pids: HashMap::new(),
+            server_ping_tx,
+            server_ping_rx,
+            server_ping_pending: HashSet::new(),
+            server_ping_cache: HashMap::new(),
             show_version_update_dialog,
             previous_launcher_version: if show_version_update_dialog {
                 Some(previous_version)
@@ -1825,6 +1847,107 @@ impl PrismarineApp {
                 }
                 ScreenshotThumbEvent::Error { source_path } => {
                     self.screenshot_thumb_pending.remove(&source_path);
+                }
+            }
+        }
+    }
+
+    fn server_ping_key(instance_path: &Path, address: &str) -> String {
+        format!(
+            "{}|{}",
+            instance_path.display(),
+            address.trim().to_ascii_lowercase()
+        )
+    }
+
+    fn queue_server_ping(&mut self, instance_path: &Path, address: &str) {
+        let addr = address.trim().to_string();
+        if addr.is_empty() {
+            return;
+        }
+        let key = Self::server_ping_key(instance_path, &addr);
+        if self.server_ping_pending.contains(&key) {
+            return;
+        }
+        if let Some((_, _, ts)) = self.server_ping_cache.get(&key)
+            && ts.elapsed() < Duration::from_secs(90)
+        {
+            return;
+        }
+        self.server_ping_pending.insert(key.clone());
+        let tx = self.server_ping_tx.clone();
+        std::thread::spawn(move || {
+            let url = format!("https://api.mcsrvstat.us/3/{}", percent_encode_query(&addr));
+            let response = reqwest::blocking::get(&url);
+            let Ok(response) = response else {
+                let _ = tx.send(ServerPingEvent::Error { key });
+                return;
+            };
+            let Ok(json) = response.json::<serde_json::Value>() else {
+                let _ = tx.send(ServerPingEvent::Error { key });
+                return;
+            };
+            let online = json
+                .get("online")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            let online_text = if online {
+                let players_online = json
+                    .get("players")
+                    .and_then(|x| x.get("online"))
+                    .and_then(|x| x.as_i64());
+                let players_max = json
+                    .get("players")
+                    .and_then(|x| x.get("max"))
+                    .and_then(|x| x.as_i64());
+                match (players_online, players_max) {
+                    (Some(a), Some(b)) if b > 0 => format!("{a}/{b}"),
+                    _ => "online".to_string(),
+                }
+            } else {
+                "offline".to_string()
+            };
+            let icon_url = Some(format!(
+                "https://api.mcsrvstat.us/icon/{}",
+                percent_encode_query(&addr)
+            ));
+            let _ = tx.send(ServerPingEvent::Ready {
+                key,
+                address: addr,
+                online_text,
+                icon_url,
+            });
+        });
+    }
+
+    fn poll_server_ping_events(&mut self) {
+        loop {
+            let Ok(event) = self.server_ping_rx.try_recv() else {
+                break;
+            };
+            match event {
+                ServerPingEvent::Ready {
+                    key,
+                    address,
+                    online_text,
+                    icon_url,
+                } => {
+                    self.server_ping_pending.remove(&key);
+                    self.server_ping_cache
+                        .insert(key, (online_text.clone(), icon_url.clone(), Instant::now()));
+                    for entry in &mut self.servers_cache {
+                        if entry.version.trim().eq_ignore_ascii_case(address.trim()) {
+                            entry.updated_at = online_text.clone();
+                            if let Some(icon) = &icon_url {
+                                entry.icon_path = Some(icon.clone());
+                            }
+                        }
+                    }
+                }
+                ServerPingEvent::Error { key } => {
+                    self.server_ping_pending.remove(&key);
+                    self.server_ping_cache
+                        .insert(key, ("offline".to_string(), None, Instant::now()));
                 }
             }
         }
@@ -3756,7 +3879,7 @@ impl PrismarineApp {
         out
     }
 
-    fn build_servers_cache(&self, instance_path: &Path) -> Vec<ContentListEntry> {
+    fn build_servers_cache(&mut self, instance_path: &Path) -> Vec<ContentListEntry> {
         let mut out = Vec::new();
         for candidate in [
             instance_path.join("minecraft").join("servers.dat"),
@@ -3783,18 +3906,30 @@ impl PrismarineApp {
                 });
             } else {
                 for (name, addr) in entries {
+                    self.queue_server_ping(instance_path, &addr);
+                    let cache_key = Self::server_ping_key(instance_path, &addr);
+                    let mut online = "...".to_string();
+                    let mut icon_path = Some(
+                        "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download"
+                            .to_string(),
+                    );
+                    if let Some((cached_online, cached_icon, _)) =
+                        self.server_ping_cache.get(&cache_key)
+                    {
+                        online = cached_online.clone();
+                        if let Some(icon) = cached_icon {
+                            icon_path = Some(icon.clone());
+                        }
+                    }
                     out.push(ContentListEntry {
                         name: name.clone(),
                         file_path: candidate.display().to_string(),
                         enabled: true,
                         display_name: name,
                         version: addr,
-                        updated_at: "...".to_string(),
+                        updated_at: online,
                         provider: "Local".to_string(),
-                        icon_path: Some(
-                            "https://minecraft.wiki/images/Repeating_Command_Block.gif?7ab3a?download"
-                                .to_string(),
-                        ),
+                        icon_path,
                     });
                 }
             }
@@ -8818,6 +8953,7 @@ impl App for PrismarineApp {
         self.poll_download_search_events();
         self.poll_download_details_events();
         self.poll_download_queue_events();
+        self.poll_server_ping_events();
         self.poll_launch_worker_events();
         self.poll_import_worker_events();
         self.poll_create_versions();
@@ -8849,6 +8985,7 @@ impl App for PrismarineApp {
             || self.launch_toast.is_some()
             || self.create_versions_loading
             || !self.screenshot_thumb_pending.is_empty()
+            || !self.server_ping_pending.is_empty()
         {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
