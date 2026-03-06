@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 36;
+const LAUNCHER_VERSION_BUILD: u32 = 37;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -3063,11 +3063,28 @@ impl PrismarineApp {
                 out.push(dir.join("java.exe"));
             }
         }
+        if let Ok(java_home) = std::env::var("JAVA_HOME")
+            && !java_home.trim().is_empty()
+        {
+            out.push(PathBuf::from(java_home).join("bin").join("java"));
+        }
         out.push(PathBuf::from("/usr/bin/java"));
         out.push(PathBuf::from("/usr/local/bin/java"));
+        for root in ["/usr/lib/jvm", "/usr/lib64/jvm", "/opt/jdk", "/opt/java"] {
+            let root_path = PathBuf::from(root);
+            if let Ok(entries) = fs::read_dir(&root_path) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        out.push(p.join("bin").join("java"));
+                    }
+                }
+            }
+        }
         if let Ok(home) = std::env::var("HOME") {
+            let home_pb = PathBuf::from(&home);
             out.push(
-                PathBuf::from(&home)
+                home_pb
                     .join(".sdkman")
                     .join("candidates")
                     .join("java")
@@ -3075,7 +3092,21 @@ impl PrismarineApp {
                     .join("bin")
                     .join("java"),
             );
-            out.push(PathBuf::from(home).join(".local").join("bin").join("java"));
+            for dir in [
+                home_pb.join(".sdkman").join("candidates").join("java"),
+                home_pb.join(".jdks"),
+                home_pb.join(".local").join("share").join("java"),
+            ] {
+                if let Ok(entries) = fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() {
+                            out.push(p.join("bin").join("java"));
+                        }
+                    }
+                }
+            }
+            out.push(home_pb.join(".local").join("bin").join("java"));
         }
         out
     }
@@ -3263,6 +3294,19 @@ impl PrismarineApp {
                 if uid.contains("neoforge") || uid == "net.neoforged" {
                     return "neoforge".to_string();
                 }
+            }
+        }
+        let cfg = load_prism_instance_config(instance_path).unwrap_or_default();
+        if let Some(loader) = cfg.managed_loader {
+            let lower = loader.trim().to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "fabric" | "forge" | "quilt" | "neoforge" | "vanilla"
+            ) {
+                if lower == "vanilla" {
+                    return String::new();
+                }
+                return lower;
             }
         }
         String::new()
@@ -6521,7 +6565,16 @@ impl PrismarineApp {
                                         ) {
                                             ui.image((tex.id(), egui::vec2(icon_size, icon_size)));
                                         } else {
-                                            ui.add_space(icon_size);
+                                            if let Some(tex) =
+                                                self.ensure_loader_icon_texture(ui.ctx(), "vanilla")
+                                            {
+                                                ui.image((
+                                                    tex.id(),
+                                                    egui::vec2(icon_size, icon_size),
+                                                ));
+                                            } else {
+                                                ui.add_space(icon_size);
+                                            }
                                         }
                                     },
                                 );
@@ -6930,7 +6983,16 @@ impl PrismarineApp {
                                                     egui::vec2(icon_size, icon_size),
                                                 ));
                                             } else {
-                                                ui.add_space(icon_size);
+                                                if let Some(tex) = self
+                                                    .ensure_loader_icon_texture(ui.ctx(), "vanilla")
+                                                {
+                                                    ui.image((
+                                                        tex.id(),
+                                                        egui::vec2(icon_size, icon_size),
+                                                    ));
+                                                } else {
+                                                    ui.add_space(icon_size);
+                                                }
                                             }
                                         },
                                     );

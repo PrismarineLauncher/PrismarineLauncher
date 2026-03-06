@@ -49,6 +49,7 @@ pub struct PrismInstanceConfig {
     pub icon_key: Option<String>,
     pub group: Option<String>,
     pub intended_version: Option<String>,
+    pub managed_loader: Option<String>,
     pub override_java_location: bool,
     pub java_path: Option<String>,
     pub override_java_args: bool,
@@ -520,6 +521,7 @@ pub fn load_prism_instance_config(instance_path: &Path) -> std::io::Result<Prism
             "IntendedVersion" | "MinecraftVersion" | "lastLaunchVersionId" => {
                 cfg.intended_version = Some(value.to_string())
             }
+            "ManagedLoader" => cfg.managed_loader = Some(value.to_string()),
             "OverrideJavaLocation" => cfg.override_java_location = parse_bool_cfg(value),
             "JavaPath" => cfg.java_path = Some(value.to_string()),
             "OverrideJavaArgs" => cfg.override_java_args = parse_bool_cfg(value),
