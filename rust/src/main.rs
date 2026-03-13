@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 37;
+const LAUNCHER_VERSION_BUILD: u32 = 38;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -5284,6 +5284,17 @@ impl PrismarineApp {
         };
 
         let working_dir = PathBuf::from(&profile.working_dir);
+        let active_game_dir = game_dir_from_profile(&profile, &instance_path);
+        if let Ok(copied) = sync_mods_to_active_game_dir(&instance_path, &active_game_dir)
+            && copied > 0
+        {
+            let msg = format!(
+                "[Launcher] Synced {copied} mods into active game dir: {}",
+                active_game_dir.display()
+            );
+            let _ = writeln!(log_file, "{msg}");
+            self.status = msg;
+        }
         for cmd_line in ctx.pre_commands {
             let _ = writeln!(log_file, "[Launcher] Pre-Launch: {}", cmd_line);
             let _ = Command::new("sh")
@@ -9771,6 +9782,78 @@ fn preferred_mods_dir(instance_path: &Path) -> PathBuf {
     let fallback = instance_path.join("minecraft/mods");
     let _ = fs::create_dir_all(&fallback);
     fallback
+}
+
+fn game_dir_from_profile(profile: &LaunchProfile, instance_path: &Path) -> PathBuf {
+    if let Some(value) = profile
+        .game_args
+        .windows(2)
+        .find(|pair| pair[0] == "--gameDir")
+        .map(|pair| pair[1].trim().to_string())
+        && !value.is_empty()
+    {
+        return PathBuf::from(value);
+    }
+    if instance_path.join("minecraft").is_dir() {
+        instance_path.join("minecraft")
+    } else if instance_path.join(".minecraft").is_dir() {
+        instance_path.join(".minecraft")
+    } else {
+        instance_path.to_path_buf()
+    }
+}
+
+fn sync_mods_to_active_game_dir(instance_path: &Path, game_dir: &Path) -> std::io::Result<usize> {
+    let target_dir = game_dir.join("mods");
+    fs::create_dir_all(&target_dir)?;
+    let mut copied = 0usize;
+    let mut seen = HashSet::<String>::new();
+    for src_dir in all_existing_mod_dirs(instance_path) {
+        if src_dir == target_dir {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&src_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let src = entry.path();
+            if !src.is_file() {
+                continue;
+            }
+            let Some(name) = src.file_name().and_then(|x| x.to_str()) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if !(lower.ends_with(".jar") || lower.ends_with(".zip") || lower.ends_with(".litemod"))
+            {
+                continue;
+            }
+            if lower.ends_with(".disabled") {
+                continue;
+            }
+            if !seen.insert(name.to_string()) {
+                continue;
+            }
+            let dst = target_dir.join(name);
+            let need_copy = if !dst.is_file() {
+                true
+            } else {
+                let src_meta = fs::metadata(&src).ok();
+                let dst_meta = fs::metadata(&dst).ok();
+                match (
+                    src_meta.as_ref().and_then(|m| m.modified().ok()),
+                    dst_meta.as_ref().and_then(|m| m.modified().ok()),
+                ) {
+                    (Some(a), Some(b)) => a > b,
+                    _ => true,
+                }
+            };
+            if need_copy && fs::copy(&src, &dst).is_ok() {
+                copied += 1;
+            }
+        }
+    }
+    Ok(copied)
 }
 
 fn all_existing_mod_dirs(instance_path: &Path) -> Vec<PathBuf> {

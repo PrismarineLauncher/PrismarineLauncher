@@ -1274,70 +1274,81 @@ pub fn prepare_local_forge_runtime(
     } else {
         instance_path.to_path_buf()
     };
-    let versions_dir = game_dir.join("versions");
-    if !versions_dir.is_dir() {
+    let mut versions_roots: Vec<PathBuf> = Vec::new();
+    for candidate in [
+        game_dir.join("versions"),
+        instance_path.join("versions"),
+        instance_path.join(".minecraft").join("versions"),
+    ] {
+        if candidate.is_dir() && !versions_roots.iter().any(|x| x == &candidate) {
+            versions_roots.push(candidate);
+        }
+    }
+    if versions_roots.is_empty() {
         return Ok(false);
     }
 
-    let mut best_id = None::<String>;
+    let mut best = None::<(PathBuf, String)>;
     let mut best_score = i32::MIN;
-    for entry in fs::read_dir(&versions_dir)
-        .map_err(|e| format!("failed to scan versions dir {}: {e}", versions_dir.display()))?
-        .flatten()
-    {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let Some(dir_name) = dir.file_name().and_then(|x| x.to_str()) else {
-            continue;
-        };
-        let json_path = dir.join(format!("{dir_name}.json"));
-        if !json_path.is_file() {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(&json_path) else {
-            continue;
-        };
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let id = json
-            .get("id")
-            .and_then(|x| x.as_str())
-            .unwrap_or(dir_name)
-            .to_string();
-        let id_lower = id.to_ascii_lowercase();
-        let mut score = 0i32;
-        if id_lower.contains("forge") {
-            score += 60;
-        }
-        if id.contains(game_version) {
-            score += 30;
-        }
-        if json
-            .get("inheritsFrom")
-            .and_then(|x| x.as_str())
-            .map(|x| x == game_version)
-            .unwrap_or(false)
+    for versions_dir in &versions_roots {
+        for entry in fs::read_dir(versions_dir)
+            .map_err(|e| format!("failed to scan versions dir {}: {e}", versions_dir.display()))?
+            .flatten()
         {
-            score += 20;
-        }
-        if json
-            .get("mainClass")
-            .and_then(|x| x.as_str())
-            .map(|x| x.to_ascii_lowercase().contains("launchwrapper"))
-            .unwrap_or(false)
-        {
-            score += 10;
-        }
-        if score > best_score {
-            best_score = score;
-            best_id = Some(id);
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(dir_name) = dir.file_name().and_then(|x| x.to_str()) else {
+                continue;
+            };
+            let json_path = dir.join(format!("{dir_name}.json"));
+            if !json_path.is_file() {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&json_path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            let id = json
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or(dir_name)
+                .to_string();
+            let id_lower = id.to_ascii_lowercase();
+            let mut score = 0i32;
+            if id_lower.contains("forge") {
+                score += 60;
+            }
+            if id.contains(game_version) {
+                score += 30;
+            }
+            if json
+                .get("inheritsFrom")
+                .and_then(|x| x.as_str())
+                .map(|x| x == game_version)
+                .unwrap_or(false)
+            {
+                score += 20;
+            }
+            if json
+                .get("mainClass")
+                .and_then(|x| x.as_str())
+                .map(|x| x.to_ascii_lowercase().contains("launchwrapper"))
+                .unwrap_or(false)
+            {
+                score += 10;
+            }
+            if score > best_score {
+                best_score = score;
+                best = Some((versions_dir.clone(), id));
+            }
         }
     }
 
-    let Some(version_id) = best_id else {
+    let Some((versions_dir, version_id)) = best else {
         return Ok(false);
     };
     if !version_id.to_ascii_lowercase().contains("forge") {
