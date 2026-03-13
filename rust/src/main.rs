@@ -370,7 +370,7 @@ const MSA_CLIENT_ID: &str = "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb";
 const FLAME_API_KEY: &str = "$2a$10$wuAJuNZuted3NORVmpgUC.m8sI.pv1tOPKZyBgLFGjxFp/br0lZCC";
 const OFFLINE_SKIN_ID: &str = "d1bf6a06a65d674a";
 const LAUNCHER_VERSION_MAJOR: u32 = 1;
-const LAUNCHER_VERSION_BUILD: u32 = 38;
+const LAUNCHER_VERSION_BUILD: u32 = 39;
 
 fn launcher_version_string() -> String {
     format!("{LAUNCHER_VERSION_MAJOR}.{LAUNCHER_VERSION_BUILD:07}")
@@ -5009,6 +5009,20 @@ impl PrismarineApp {
         upsert_jvm_system_property(&mut profile.jvm_args, "user.language", "en");
         if profile.working_dir.trim().is_empty() {
             profile.working_dir = instance.path.clone();
+        }
+        let current_game_dir = game_dir_from_profile(&profile, &instance_path);
+        let root_mods_count = count_mod_files_in_dir(&instance_path.join("mods"));
+        let game_mods_count = count_mod_files_in_dir(&current_game_dir.join("mods"));
+        if root_mods_count > 0 && game_mods_count == 0 {
+            upsert_arg_pair(
+                &mut profile.game_args,
+                "--gameDir",
+                &instance_path.display().to_string(),
+            );
+            self.append_launcher_log(
+                &instance.path,
+                "[Launcher] Auto-switched --gameDir to instance root (mods found in root/mods)",
+            );
         }
         self.apply_account_launch_args(&mut profile.game_args);
 
@@ -9801,6 +9815,22 @@ fn game_dir_from_profile(profile: &LaunchProfile, instance_path: &Path) -> PathB
     } else {
         instance_path.to_path_buf()
     }
+}
+
+fn count_mod_files_in_dir(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy().to_ascii_lowercase();
+            (name.ends_with(".jar") || name.ends_with(".zip") || name.ends_with(".litemod"))
+                && !name.ends_with(".disabled")
+        })
+        .count()
 }
 
 fn sync_mods_to_active_game_dir(instance_path: &Path, game_dir: &Path) -> std::io::Result<usize> {
